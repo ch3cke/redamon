@@ -545,6 +545,479 @@ async def llm_ffuf_extensions(body: FfufExtensionsRequest):
     return {"extensions": extensions[:body.max_extensions]}
 
 
+class NucleiTagsRequest(BaseModel):
+    technologies: list[str]
+    servers: list[str]
+    current_tags: list[str]
+    candidates: list[str]
+    model: str
+    max_tags: int = 15
+    user_id: Optional[str] = None
+    project_id: Optional[str] = None
+
+
+_NUCLEI_TAGS_SYSTEM_PROMPT = """You are a security testing assistant selecting Nuclei
+template tags for a vulnerability scan. Given a tech stack fingerprint, pick the
+tags most likely to find real vulnerabilities and drop irrelevant ones.
+
+Rules:
+- You MUST pick ONLY from the `candidates` list provided. Any tag not in
+  candidates will be rejected.
+- ALWAYS keep universal high-impact tags when present in candidates: cve,
+  exposure, misconfig, default-login, kev, oast, takeover.
+- INCLUDE tech-specific tags ONLY when the technology is detected:
+    WordPress signal -> wordpress, wp-plugin, wp (when in candidates)
+    Apache signal    -> apache
+    Nginx signal     -> nginx
+    IIS / ASP.NET    -> iis, dotnet
+    Tomcat / JVM     -> tomcat, java
+    PHP signal       -> php
+    Node/React/Express signal -> nodejs
+    Joomla / Drupal / Magento / Jenkins / GitLab / Jira / Confluence -> their tag
+    AWS / Azure / GCP / cloud signal -> their cloud tag
+- DROP tech tags whose stack is NOT detected. Do not invent technologies that
+  are not in the input.
+- DROP narrow vuln-class tags that don't fit the stack (e.g. drop xxe on pure-JS
+  apps with no XML, drop ssti if no template engine signal, drop sqli if the
+  app appears static).
+- Cap output at `max_tags` (default 15). Prefer breadth over redundancy.
+- Be conservative: if unsure whether a tag matches, drop it.
+
+Respond with ONLY a JSON object of this exact shape, no prose:
+{"tags": ["tag1", "tag2", ...]}"""
+
+
+@app.post("/llm/nuclei-tags", tags=["LLM"])
+async def llm_nuclei_tags(body: NucleiTagsRequest):
+    """Suggest Nuclei tags for a vuln scan based on tech fingerprint.
+
+    Called by the recon container's AI planner when NUCLEI_AI_TAGS is on.
+    Reuses the same per-user LLM provider resolution as the agent itself.
+    """
+    import json as json_mod
+
+    logger.info(
+        "nuclei-tags: model=%s user=%s techs=%d servers=%d candidates=%d",
+        body.model, body.user_id, len(body.technologies or []),
+        len(body.servers or []), len(body.candidates or []),
+    )
+
+    try:
+        llm = _build_llm_with_model_for_user(body.model, body.user_id)
+    except Exception as e:
+        logger.error(f"nuclei-tags: cannot set up LLM: {e}")
+        return JSONResponse(content={"error": f"LLM not configured: {e}"}, status_code=503)
+
+    user_msg = (
+        f"Detected technologies: {json_mod.dumps(body.technologies)}\n"
+        f"Detected servers: {json_mod.dumps(body.servers)}\n"
+        f"User's current tags: {json_mod.dumps(body.current_tags)}\n"
+        f"Candidates (pick only from these): {json_mod.dumps(body.candidates)}\n"
+        f"Pick up to {body.max_tags} tags."
+    )
+
+    try:
+        response = await llm.ainvoke([
+            SystemMessage(content=_NUCLEI_TAGS_SYSTEM_PROMPT),
+            HumanMessage(content=user_msg),
+        ])
+    except Exception as e:
+        logger.error(f"nuclei-tags: LLM call failed: {e}")
+        return JSONResponse(content={"error": f"LLM call failed: {e}"}, status_code=502)
+
+    raw_text = (getattr(response, 'content', None) or '').strip()
+    if raw_text.startswith('```'):
+        raw_text = raw_text.strip('`')
+        if raw_text.startswith('json'):
+            raw_text = raw_text[4:].strip()
+
+    try:
+        data = json_mod.loads(raw_text)
+    except (json_mod.JSONDecodeError, ValueError) as e:
+        logger.warning(f"nuclei-tags: model returned non-JSON ({e}): {raw_text[:200]}")
+        return JSONResponse(content={"error": "Model returned non-JSON", "raw": raw_text[:500]}, status_code=502)
+
+    tags = data.get('tags', [])
+    if not isinstance(tags, list):
+        return JSONResponse(content={"error": "Model returned non-list tags", "raw": str(tags)[:500]}, status_code=502)
+
+    return {"tags": tags[:body.max_tags]}
+
+
+class WafClassifyRequest(BaseModel):
+    url: str
+    status_code: int
+    headers: dict
+    body_sample: str = ""
+    response_time_ms: int = 0
+    model: str
+    user_id: Optional[str] = None
+    project_id: Optional[str] = None
+
+
+_WAF_CLASSIFY_SYSTEM_PROMPT = """You are a security testing assistant classifying whether
+an HTTP response came through a WAF (Web Application Firewall) or CDN edge layer.
+Your output drives downstream throttling and false-positive filtering, so calibrated
+confidence matters more than guessing a vendor.
+
+You will receive: target URL, HTTP status code, full response headers, the first
+4KB of the response body, and an optional response_time_ms hint.
+
+Detection signals to weigh:
+- Header tokens (vendor-branded): cf-ray, cf-cache-status, x-amz-cf-id, x-served-by,
+  x-akamai-*, x-fastly-request-id, x-azure-ref, x-azure-fdid, x-sucuri-id, x-iinfo
+  (Imperva), Server: cloudflare/cloudfront/akamai/fastly/varnish/imperva/sucuri.
+- Cookie tokens: __cf_bm, cf_clearance, __cfduid (cloudflare), incap_ses_, visid_incap_
+  (imperva), AKA_A2/AKAALB_ (akamai), awsalb (AWS), TS01* (BIG-IP/F5).
+- Body fingerprints: "Attention Required! | Cloudflare", "error 1003", "Request blocked",
+  "Access denied", "Reference #", challenge-page HTML structures, captcha widgets,
+  Akamai "Pragma" pages, AWS WAF "Request blocked" JSON.
+- Status+body mismatch: 200 OK with a tiny "blocked" body, 403 with branded reason
+  phrase, 406/418/429 returned for benign requests.
+- Latency outliers: response_time_ms >> 200ms for a static-looking 403 hints at
+  inspection delay.
+- Status codes commonly used by WAFs to short-circuit: 403, 406, 418, 429, 503.
+
+WAF type values you may emit (lowercase, snake/kebab):
+cloudflare, akamai, aws_waf, imperva, sucuri, fastly, azure_frontdoor, cloudfront,
+modsecurity, f5, fortinet, barracuda, stackpath, custom. Use null for waf_type when
+waf_detected is false. Use "custom" if signals indicate a WAF but vendor is unclear.
+
+Confidence calibration (be honest, not optimistic):
+- 90-100: clear vendor branding in multiple places (header + cookie + body)
+- 70-89: strong fingerprint (one branded header OR challenge-page body)
+- 40-69: suggestive signals (status+body mismatch, latency, no vendor token)
+- 10-39: weak hints, mostly speculative
+- 0-9:   no signal at all (return waf_detected=false)
+
+Reasoning field: ONE sentence (<=200 chars) citing the strongest signals.
+
+Respond with ONLY a JSON object of this exact shape, no prose:
+{"waf_detected": true|false, "waf_type": "cloudflare"|null, "confidence": 0..100, "reasoning": "..."}"""
+
+
+@app.post("/llm/waf-classify", tags=["LLM"])
+async def llm_waf_classify(body: WafClassifyRequest):
+    """Classify whether a response came through a WAF/CDN.
+
+    Called by the recon container's WAF AI classifier when WAF_AI_CLASSIFIER is on.
+    Reuses the same per-user LLM provider resolution as the agent itself.
+    """
+    import json as json_mod
+
+    logger.info(
+        "waf-classify: url=%s status=%d model=%s user=%s headers=%d body=%dB rt=%dms",
+        body.url, body.status_code, body.model, body.user_id,
+        len(body.headers or {}), len(body.body_sample or ''), body.response_time_ms,
+    )
+
+    try:
+        llm = _build_llm_with_model_for_user(body.model, body.user_id)
+    except Exception as e:
+        logger.error(f"waf-classify: cannot set up LLM: {e}")
+        return JSONResponse(content={"error": f"LLM not configured: {e}"}, status_code=503)
+
+    user_msg = (
+        f"URL: {body.url}\n"
+        f"Status: {body.status_code}\n"
+        f"Response time (ms): {body.response_time_ms}\n"
+        f"Headers: {json_mod.dumps(body.headers)}\n"
+        f"Body sample (first 4KB):\n{body.body_sample}"
+    )
+
+    try:
+        response = await llm.ainvoke([
+            SystemMessage(content=_WAF_CLASSIFY_SYSTEM_PROMPT),
+            HumanMessage(content=user_msg),
+        ])
+    except Exception as e:
+        logger.error(f"waf-classify: LLM call failed: {e}")
+        return JSONResponse(content={"error": f"LLM call failed: {e}"}, status_code=502)
+
+    raw_text = (getattr(response, 'content', None) or '').strip()
+    if raw_text.startswith('```'):
+        raw_text = raw_text.strip('`')
+        if raw_text.startswith('json'):
+            raw_text = raw_text[4:].strip()
+
+    try:
+        data = json_mod.loads(raw_text)
+    except (json_mod.JSONDecodeError, ValueError) as e:
+        logger.warning(f"waf-classify: model returned non-JSON ({e}): {raw_text[:200]}")
+        return JSONResponse(content={"error": "Model returned non-JSON", "raw": raw_text[:500]}, status_code=502)
+
+    if not isinstance(data, dict):
+        return JSONResponse(content={"error": "Model returned non-object", "raw": str(data)[:500]}, status_code=502)
+
+    detected = data.get('waf_detected')
+    confidence = data.get('confidence')
+    if not isinstance(detected, bool) or not isinstance(confidence, (int, float)):
+        return JSONResponse(content={"error": "Model returned malformed schema", "raw": str(data)[:500]}, status_code=502)
+
+    return {
+        "waf_detected": detected,
+        "waf_type": data.get('waf_type'),
+        "confidence": int(confidence),
+        "reasoning": (data.get('reasoning') or '')[:500],
+    }
+
+
+class NucleiFpFilterRequest(BaseModel):
+    template_id: str
+    tags: list[str] = []
+    status_line: str = ""
+    response_sample: str = ""
+    model: str
+    user_id: Optional[str] = None
+    project_id: Optional[str] = None
+
+
+_NUCLEI_FP_FILTER_SYSTEM_PROMPT = """You are a security testing assistant deciding
+whether a Nuclei response is a real vulnerability hit or a WAF/rate-limit block
+page disguised as one. Your verdict gates the finding -- a wrong "blocked" call
+HIDES a real vuln, a wrong "real" call SHIPS a false positive. Calibrate.
+
+You will receive: Nuclei template id, template tags (sqli/xss/rce/...), HTTP
+status line, and the first 4KB of the response body.
+
+Block-page signals (lean toward is_blocked=true):
+- Status 403/406/418/429/503 paired with a tiny generic body.
+- Body contains vendor-branded WAF text: "Cloudflare Ray ID", "Reference #",
+  "Request ID:", "AWS WAF", "Imperva Incapsula", "Sucuri", "ModSecurity",
+  "Forbidden by F5", "Fortinet". Note: a body MENTIONING WAF terms in a
+  legitimate context (admin panel, docs) is NOT a block; look at structure.
+- Body is a generic 1-2 line error: "Access Denied", "Request blocked",
+  "Sorry, your request couldn't be processed".
+- AWS WAF JSON shape: {"message": "Forbidden"} or similar minimal JSON error.
+- Cookies set in response: __cf_bm, cf_clearance, incap_ses_, visid_incap_,
+  AKA_A2, awsalb, TS01* (BIG-IP/F5).
+- Body is a captcha/challenge page: "Please verify you are human", JS challenge
+  redirect, "Just a moment...".
+
+Real-finding signals (lean toward is_blocked=false):
+- Status 200/302 with substantive content (DB error message, reflected payload,
+  exposed file content, version banner, debug page).
+- Body contains actual evidence the template was looking for: SQL error string,
+  reflected XSS payload echo, OS command output, leaked stack trace, file system
+  paths, debug variable dumps.
+- Body discusses WAF terms in CONTEXT (e.g. an admin panel that lets you toggle
+  WAF settings) -- that's the page being exposed, not the page blocking you.
+- Status code matches what the template hunts for (e.g. 200 for an exposure
+  template, 500 for a backend error template).
+
+Confidence calibration (be honest):
+- 90-100: clear vendor branding (WAF cookie + status + branded body).
+- 70-89: strong block-page shape (small body + suspicious status + generic
+  error tone) OR strong real-hit shape (clear template-target evidence).
+- 40-69: ambiguous (small 403 with no vendor signature, could be either).
+- 10-39: weak hint, mostly speculative.
+- 0-9: no signal -- return is_blocked=false.
+
+Reason field: ONE sentence (<=200 chars) citing the strongest signal.
+
+Respond with ONLY a JSON object of this exact shape, no prose:
+{"is_blocked": true|false, "confidence": 0..100, "reason": "..."}"""
+
+
+@app.post("/llm/nuclei-fp-filter", tags=["LLM"])
+async def llm_nuclei_fp_filter(body: NucleiFpFilterRequest):
+    """Classify whether a Nuclei response is a WAF/rate-limit block page
+    rather than a real vulnerability hit.
+
+    Called by the recon container's Nuclei FP filter when
+    NUCLEI_AI_RESPONSE_FILTER is on. Reuses the same per-user LLM provider
+    resolution as the agent itself.
+    """
+    import json as json_mod
+
+    logger.info(
+        "nuclei-fp-filter: template=%s tags=%s status=%s body=%dB model=%s user=%s",
+        body.template_id, body.tags, body.status_line[:60],
+        len(body.response_sample or ''), body.model, body.user_id,
+    )
+
+    try:
+        llm = _build_llm_with_model_for_user(body.model, body.user_id)
+    except Exception as e:
+        logger.error(f"nuclei-fp-filter: cannot set up LLM: {e}")
+        return JSONResponse(content={"error": f"LLM not configured: {e}"}, status_code=503)
+
+    user_msg = (
+        f"Template: {body.template_id}\n"
+        f"Tags: {json_mod.dumps(body.tags)}\n"
+        f"Status: {body.status_line}\n"
+        f"Response sample (first 4KB):\n{body.response_sample}"
+    )
+
+    try:
+        response = await llm.ainvoke([
+            SystemMessage(content=_NUCLEI_FP_FILTER_SYSTEM_PROMPT),
+            HumanMessage(content=user_msg),
+        ])
+    except Exception as e:
+        logger.error(f"nuclei-fp-filter: LLM call failed: {e}")
+        return JSONResponse(content={"error": f"LLM call failed: {e}"}, status_code=502)
+
+    raw_text = (getattr(response, 'content', None) or '').strip()
+    if raw_text.startswith('```'):
+        raw_text = raw_text.strip('`')
+        if raw_text.startswith('json'):
+            raw_text = raw_text[4:].strip()
+
+    try:
+        data = json_mod.loads(raw_text)
+    except (json_mod.JSONDecodeError, ValueError) as e:
+        logger.warning(f"nuclei-fp-filter: model returned non-JSON ({e}): {raw_text[:200]}")
+        return JSONResponse(content={"error": "Model returned non-JSON", "raw": raw_text[:500]}, status_code=502)
+
+    if not isinstance(data, dict):
+        return JSONResponse(content={"error": "Model returned non-object", "raw": str(data)[:500]}, status_code=502)
+
+    is_blocked = data.get('is_blocked')
+    confidence = data.get('confidence')
+    if not isinstance(is_blocked, bool) or not isinstance(confidence, (int, float)):
+        return JSONResponse(content={"error": "Model returned malformed schema", "raw": str(data)[:500]}, status_code=502)
+
+    return {
+        "is_blocked": is_blocked,
+        "confidence": int(confidence),
+        "reason": (data.get('reason') or '')[:500],
+    }
+
+
+class TakeoverClassifyRequest(BaseModel):
+    hostname: str
+    expected_provider: str = ""
+    status_code: int = 0
+    headers: dict = {}
+    response_sample: str = ""
+    model: str
+    user_id: Optional[str] = None
+    project_id: Optional[str] = None
+
+
+_TAKEOVER_CLASSIFY_SYSTEM_PROMPT = """You are a security testing assistant deciding
+whether an HTTP response is a genuine third-party SaaS "service unclaimed" page
+(a real subdomain takeover candidate) or a WAF block page that LOOKS like one.
+
+Subdomain takeover detectors (Subjack, Nuclei takeover templates) match against
+fingerprint strings like "There's nothing here yet" (Heroku), "NoSuchBucket"
+(S3), "The page you have requested does not exist" (Bitbucket). WAFs and CDN
+edges with no origin configured for a hostname return very similar text. The
+collision produces critical-severity false positives that page on-call.
+
+You will receive: hostname, the takeover provider the static signature claimed
+to match, HTTP status code, response headers, and the first 4KB of the
+response body.
+
+WAF-block signals (lean is_waf_block=true):
+- Status 403/406/429/503 (most SaaS unclaimed pages return 404).
+- Body is a generic 1-2 line error with no provider branding.
+- Body contains vendor WAF signatures: "Cloudflare Ray ID", "Reference #",
+  "AWS WAF", "Imperva", "Akamai", "Sucuri", "ModSecurity", "Forbidden by F5".
+- Cookies set: __cf_bm, cf_clearance, incap_ses_, awsalb, TS01*, akamai-*.
+- Response body claims "blocked" / "denied" / "unauthorized" without naming
+  the SaaS provider the static fingerprint claimed.
+- Body shape mismatches the claimed provider (e.g. claimed "heroku" but the
+  body has no Heroku branding, dyno mention, or characteristic styling).
+
+Genuine-unclaimed signals (lean is_waf_block=false):
+- Status 404 with body that EXPLICITLY names the claimed provider:
+  - heroku: "There's nothing here yet", references herokuapp.com
+  - s3: "NoSuchBucket", "The specified bucket does not exist"
+  - github pages: "There isn't a GitHub Pages site here"
+  - bitbucket: "Repository not found"
+  - netlify/vercel/surge: provider-branded "site not found" pages
+- Body has provider-specific HTML structure (Heroku error theme, S3 XML
+  error, GitHub octocat).
+- Headers include the SaaS edge's Server token (Server: AmazonS3,
+  GitHub.com, Netlify, Vercel) -- this is unambiguous proof.
+
+Special case -- AMBIGUOUS but lean WAF when:
+- Generic "page not found" 404 with NO provider branding at all (could be
+  either; absence of provider signal is itself suspicious for a real
+  takeover).
+
+Confidence calibration:
+- 90-100: clear vendor branding (WAF cookie/branded body OR clear SaaS-
+  branded unclaimed page).
+- 70-89: strong shape signal (clean WAF block tone OR clean SaaS error).
+- 40-69: ambiguous, no clear vendor token either way.
+- 10-39: weak hint.
+- 0-9: no signal.
+
+Reason field: ONE sentence (<=200 chars) citing the strongest signal.
+
+Respond with ONLY a JSON object of this exact shape, no prose:
+{"is_waf_block": true|false, "confidence": 0..100, "reason": "..."}"""
+
+
+@app.post("/llm/takeover-classify", tags=["LLM"])
+async def llm_takeover_classify(body: TakeoverClassifyRequest):
+    """Disambiguate a takeover finding from a WAF block masquerading as one.
+
+    Called by the recon container's takeover scanner when
+    TAKEOVER_AI_CLASSIFIER is on. Reuses the same per-user LLM provider
+    resolution as the agent itself.
+    """
+    import json as json_mod
+
+    logger.info(
+        "takeover-classify: host=%s provider=%s status=%d body=%dB model=%s user=%s",
+        body.hostname, body.expected_provider, body.status_code,
+        len(body.response_sample or ''), body.model, body.user_id,
+    )
+
+    try:
+        llm = _build_llm_with_model_for_user(body.model, body.user_id)
+    except Exception as e:
+        logger.error(f"takeover-classify: cannot set up LLM: {e}")
+        return JSONResponse(content={"error": f"LLM not configured: {e}"}, status_code=503)
+
+    user_msg = (
+        f"Hostname: {body.hostname}\n"
+        f"Claimed provider: {body.expected_provider}\n"
+        f"Status: {body.status_code}\n"
+        f"Headers: {json_mod.dumps(body.headers)}\n"
+        f"Response sample (first 4KB):\n{body.response_sample}"
+    )
+
+    try:
+        response = await llm.ainvoke([
+            SystemMessage(content=_TAKEOVER_CLASSIFY_SYSTEM_PROMPT),
+            HumanMessage(content=user_msg),
+        ])
+    except Exception as e:
+        logger.error(f"takeover-classify: LLM call failed: {e}")
+        return JSONResponse(content={"error": f"LLM call failed: {e}"}, status_code=502)
+
+    raw_text = (getattr(response, 'content', None) or '').strip()
+    if raw_text.startswith('```'):
+        raw_text = raw_text.strip('`')
+        if raw_text.startswith('json'):
+            raw_text = raw_text[4:].strip()
+
+    try:
+        data = json_mod.loads(raw_text)
+    except (json_mod.JSONDecodeError, ValueError) as e:
+        logger.warning(f"takeover-classify: model returned non-JSON ({e}): {raw_text[:200]}")
+        return JSONResponse(content={"error": "Model returned non-JSON", "raw": raw_text[:500]}, status_code=502)
+
+    if not isinstance(data, dict):
+        return JSONResponse(content={"error": "Model returned non-object", "raw": str(data)[:500]}, status_code=502)
+
+    is_waf_block = data.get('is_waf_block')
+    confidence = data.get('confidence')
+    if not isinstance(is_waf_block, bool) or not isinstance(confidence, (int, float)):
+        return JSONResponse(content={"error": "Model returned malformed schema", "raw": str(data)[:500]}, status_code=502)
+
+    return {
+        "is_waf_block": is_waf_block,
+        "confidence": int(confidence),
+        "reason": (data.get('reason') or '')[:500],
+    }
+
+
 @app.post("/emergency-stop-all", tags=["System"])
 async def emergency_stop_all():
     """Emergency stop: cancel every running agent task immediately."""

@@ -287,6 +287,8 @@ model Project {
   nucleiScanAllIps            Boolean  @default(false) @map("nuclei_scan_all_ips")
   nucleiInteractsh            Boolean  @default(true) @map("nuclei_interactsh")
   nucleiDockerImage           String   @default("projectdiscovery/nuclei:latest") @map("nuclei_docker_image")
+  nucleiAiTags                Boolean  @default(false) @map("nuclei_ai_tags")
+  nucleiAiResponseFilter      Boolean  @default(false) @map("nuclei_ai_response_filter")
 
   // ========== SUBDOMAIN TAKEOVER (Subjack + Nuclei takeover templates) ==========
   subdomainTakeoverEnabled         Boolean  @default(false) @map("subdomain_takeover_enabled")
@@ -301,6 +303,7 @@ model Project {
   subjackRunTimeout                Int      @default(900)   @map("subjack_run_timeout")
   nucleiTakeoversEnabled           Boolean  @default(true)  @map("nuclei_takeovers_enabled")
   nucleiTakeoverRunTimeout         Int      @default(1800)  @map("nuclei_takeover_run_timeout")
+  takeoverAiClassifier             Boolean  @default(false) @map("takeover_ai_classifier")
   takeoverSeverity                 String[] @default(["critical", "high", "medium"]) @map("takeover_severity")
   takeoverConfidenceThreshold      Int      @default(60)    @map("takeover_confidence_threshold")
   takeoverRateLimit                Int      @default(50)    @map("takeover_rate_limit")
@@ -526,6 +529,7 @@ model Project {
   securityCheckDirectIpHttps        Boolean @default(true) @map("security_check_direct_ip_https")
   securityCheckIpApiExposed         Boolean @default(true) @map("security_check_ip_api_exposed")
   securityCheckWafBypass            Boolean @default(true) @map("security_check_waf_bypass")
+  wafAiClassifier                   Boolean @default(false) @map("waf_ai_classifier")
   securityCheckTlsExpiringSoon      Boolean @default(true) @map("security_check_tls_expiring_soon")
   securityCheckTlsExpiryDays        Int     @default(30) @map("security_check_tls_expiry_days")
   securityCheckMissingReferrerPolicy Boolean @default(true) @map("security_check_missing_referrer_policy")

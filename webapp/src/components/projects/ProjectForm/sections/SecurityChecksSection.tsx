@@ -6,6 +6,7 @@ import { Toggle, WikiInfoButton } from '@/components/ui'
 import type { Project } from '@prisma/client'
 import styles from '../ProjectForm.module.css'
 import { NodeInfoTooltip } from '../NodeInfoTooltip'
+import { AiToggleLabel } from '../AiToggleLabel'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
 
@@ -118,6 +119,26 @@ export function SecurityChecksSection({ data, updateField, onRun }: SecurityChec
                   <Toggle
                     checked={data.securityCheckWafBypass}
                     onChange={(checked) => updateField('securityCheckWafBypass', checked)}
+                  />
+                </div>
+                <div className={styles.toggleRow} style={{ alignItems: 'center', gap: 'var(--space-4)' }}>
+                  <AiToggleLabel
+                    label="Use AI for WAF Classification"
+                    tooltip={
+                      'Augments the static WAF/CDN header-token check. When the ' +
+                      'static list misses (modern WAFs strip or rebrand their ' +
+                      'headers), the response gets a second pass through the ' +
+                      'configured model, which scores WAF presence 0-100 from ' +
+                      'headers, body fingerprints, cookies, and latency. ' +
+                      'AI-detected bypasses are tagged with ' +
+                      'detection_method=ai_classifier, waf_type, waf_confidence. ' +
+                      (!data.aiInPipeline ? 'Enable "AI in Pipeline" in the Target tab to use this.' : '')
+                    }
+                  />
+                  <Toggle
+                    checked={data.wafAiClassifier}
+                    disabled={!data.aiInPipeline}
+                    onChange={(checked) => updateField('wafAiClassifier', checked)}
                   />
                 </div>
               </div>

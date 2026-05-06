@@ -6,6 +6,7 @@ import { Toggle, WikiInfoButton } from '@/components/ui'
 import type { Project } from '@prisma/client'
 import styles from '../ProjectForm.module.css'
 import { NodeInfoTooltip } from '../NodeInfoTooltip'
+import { AiToggleLabel } from '../AiToggleLabel'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
 
@@ -166,6 +167,27 @@ export function TakeoverSection({ data, updateField, onRun }: TakeoverSectionPro
                   <Toggle
                     checked={data.baddnsEnabled}
                     onChange={(checked) => updateField('baddnsEnabled', checked)}
+                  />
+                </div>
+
+                <div className={styles.toggleRow} style={{ alignItems: 'center' }}>
+                  <AiToggleLabel
+                    label='Use AI to Disambiguate WAF "No-Host" Pages'
+                    tooltip={
+                      'Subjack/Nuclei body fingerprints collide with WAF block pages ' +
+                      "for hostnames the WAF doesn't recognize. When on, each " +
+                      'takeover candidate is probed; if no third-party vendor token ' +
+                      '(Heroku-Request-Id, x-amz-bucket-region, etc.) is present, ' +
+                      'the LLM classifies the body as real unclaimed page or WAF ' +
+                      'block. AI-flagged collisions get a -40 score penalty and land ' +
+                      'in manual_review instead of confirmed/likely. ' +
+                      (!data.aiInPipeline ? 'Enable "AI in Pipeline" in the Target tab to use this.' : '')
+                    }
+                  />
+                  <Toggle
+                    checked={data.takeoverAiClassifier}
+                    disabled={!data.aiInPipeline}
+                    onChange={(checked) => updateField('takeoverAiClassifier', checked)}
                   />
                 </div>
               </div>

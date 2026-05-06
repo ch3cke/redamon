@@ -7,6 +7,7 @@ import type { Project } from '@prisma/client'
 import styles from '../ProjectForm.module.css'
 import { NodeInfoTooltip } from '../NodeInfoTooltip'
 import { FileImportButton } from '../FileImportButton'
+import { AiToggleLabel } from '../AiToggleLabel'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
 
@@ -427,17 +428,18 @@ export function FfufSection({ data, updateField, projectId, mode, onRun }: FfufS
                 </div>
                 <div className={styles.fieldGroup}>
                   <label className={styles.fieldLabel}>Extensions</label>
-                  <div className={styles.toggleRow} style={{ marginBottom: 'var(--space-2)' }}>
-                    <div style={{ flex: 1 }}>
-                      <span className={styles.toggleLabel}>Use AI for Extensions</span>
-                      <p className={styles.toggleDescription}>
-                        AI picks file extensions per target based on server response
-                        headers. When on, the static list below is ignored.
-                        {!data.aiInPipeline && (
-                          <span> Enable &quot;AI in Pipeline&quot; in the Target tab to use this.</span>
-                        )}
-                      </p>
-                    </div>
+                  <div className={styles.toggleRow} style={{ marginBottom: 'var(--space-2)', alignItems: 'center' }}>
+                    <AiToggleLabel
+                      label="Use AI for Extensions"
+                      tooltip={
+                        'AI picks file extensions per target based on server response headers ' +
+                        '(Server, X-Powered-By, X-AspNet-Version). When on, the static list below ' +
+                        'is ignored. Same toggle as in the Target tab AI panel: flipping it here ' +
+                        'flips it there. A per-fingerprint cache means N hosts behind the same ' +
+                        'stack collapse to one LLM call. ' +
+                        (!data.aiInPipeline ? 'Enable "AI in Pipeline" in the Target tab to use this.' : '')
+                      }
+                    />
                     <Toggle
                       checked={data.ffufAiExtensions}
                       disabled={!data.aiInPipeline}

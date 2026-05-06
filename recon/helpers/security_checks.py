@@ -123,16 +123,82 @@ _WAF_CDN_SERVER_TOKENS = (
 )
 
 
+# Per-scan AI classifier context. Initialized once at the top of
+# run_security_checks() and consumed by _has_cdn_markers() and
+# check_waf_bypass(). A module-level dict keeps the call signatures of
+# every check function unchanged while still letting the WAF-AI cascade
+# fall back deterministically when AI is off.
+_AI_CTX: Dict[str, Any] = {
+    "enabled": False,
+    "model": "",
+    "user_id": "",
+    "project_id": "",
+    "cache": None,  # populated when enabled
+}
+
+# Confidence thresholds used by the cascade. >=70 on the hostname response
+# means "AI is confident this is a WAF". <30 on the IP response means "AI
+# is confident the origin has no WAF" (so a real bypass is plausible).
+_AI_WAF_PRESENT_THRESHOLD = 70
+_AI_WAF_ABSENT_THRESHOLD = 30
+
+
+def _set_ai_ctx(enabled: bool, model: str, user_id: str, project_id: str) -> None:
+    """Initialize the per-scan AI classifier context. Called from
+    run_security_checks() based on the WAF_AI_CLASSIFIER setting."""
+    _AI_CTX["enabled"] = bool(enabled and model)
+    _AI_CTX["model"] = model or ""
+    _AI_CTX["user_id"] = user_id or ""
+    _AI_CTX["project_id"] = project_id or ""
+    _AI_CTX["cache"] = {} if _AI_CTX["enabled"] else None
+
+
+def _classify_waf_ai(response, response_time_ms: int = 0) -> Optional[Dict]:
+    """Lazy wrapper around the AI classifier. Returns None if AI is not
+    enabled, the response is None, or the classifier returns its safe
+    fallback (so callers can keep the static behavior)."""
+    if not _AI_CTX["enabled"] or response is None:
+        return None
+    try:
+        from recon.helpers.ai_planner.waf_classifier import classify_waf, SAFE_FALLBACK
+    except Exception as exc:
+        print(f"[!][WAF-AI] Cannot import waf_classifier: {exc}")
+        return None
+    result = classify_waf(
+        response,
+        model=_AI_CTX["model"],
+        cache=_AI_CTX["cache"],
+        user_id=_AI_CTX["user_id"],
+        project_id=_AI_CTX["project_id"],
+        response_time_ms=response_time_ms,
+    )
+    if result.get("source") == "ai_unavailable":
+        return None
+    return result
+
+
 def _has_cdn_markers(response) -> bool:
     """True if *response* carries any header / Server token that indicates
-    it came through a CDN or WAF front layer."""
+    it came through a CDN or WAF front layer.
+
+    When the WAF AI classifier is enabled (per-scan via _set_ai_ctx), a
+    static-negative response gets a second pass through the LLM. Confidence
+    >= _AI_WAF_PRESENT_THRESHOLD flips the verdict to True so the
+    bare-origin comparison in _is_bare_origin_match correctly recognises a
+    rebranded/header-stripped WAF."""
     if response is None:
         return False
     headers_lower = {k.lower(): v for k, v in (response.headers or {}).items()}
     if any(h in headers_lower for h in _WAF_CDN_HEADER_NAMES):
         return True
     server = headers_lower.get("server", "").lower()
-    return any(tok in server for tok in _WAF_CDN_SERVER_TOKENS)
+    if any(tok in server for tok in _WAF_CDN_SERVER_TOKENS):
+        return True
+
+    ai_result = _classify_waf_ai(response)
+    if ai_result and ai_result.get("waf_detected") and ai_result.get("confidence", 0) >= _AI_WAF_PRESENT_THRESHOLD:
+        return True
+    return False
 
 
 def _is_bare_origin_match(ip: str, hostnames: List[str], scheme: str, timeout: int) -> bool:
@@ -499,14 +565,41 @@ def check_waf_bypass(
         waf_indicators = ["cloudflare", "akamai", "cloudfront", "fastly", "imperva", "sucuri"]
         subdomain_has_waf = any(waf in subdomain_server for waf in waf_indicators)
         ip_has_waf = any(waf in ip_server for waf in waf_indicators)
+        detection_method = "static_headers"
+        ai_subdomain: Optional[Dict] = None
+        ai_ip: Optional[Dict] = None
+
+        # AI cascade: when the static Server-token check missed a WAF on the
+        # hostname, ask the classifier. A high-confidence "WAF on hostname"
+        # paired with a low-confidence "no WAF on IP" is a real bypass.
+        if not subdomain_has_waf:
+            ai_subdomain = _classify_waf_ai(subdomain_response)
+            if ai_subdomain and ai_subdomain.get("waf_detected") and ai_subdomain.get("confidence", 0) >= _AI_WAF_PRESENT_THRESHOLD:
+                subdomain_has_waf = True
+                detection_method = "ai_classifier"
+                if not ai_ip:
+                    ai_ip = _classify_waf_ai(ip_response)
+                if ai_ip and (ai_ip.get("waf_detected") and ai_ip.get("confidence", 0) >= _AI_WAF_PRESENT_THRESHOLD):
+                    # AI sees a WAF on the IP too, so treat the origin as also
+                    # protected -- not a bypass.
+                    ip_has_waf = True
 
         # WAF bypass: subdomain has WAF but IP doesn't, and IP returns valid response
         if subdomain_has_waf and not ip_has_waf and ip_response.status_code < 500:
-            return {
+            waf_label = (
+                ai_subdomain.get("waf_type") if (detection_method == "ai_classifier" and ai_subdomain)
+                else (subdomain_server or "unknown")
+            )
+            evidence = (
+                f"AI classifier flagged subdomain as {waf_label} (confidence={ai_subdomain.get('confidence')}); IP response did not match WAF fingerprint"
+                if detection_method == "ai_classifier" and ai_subdomain
+                else f"WAF detected on subdomain ({subdomain_server}) but not on IP"
+            )
+            finding = {
                 "type": "waf_bypass",
                 "severity": "high",
                 "name": "WAF Bypass via Direct IP Access",
-                "description": f"The subdomain {subdomain} is protected by WAF ({subdomain_server}), "
+                "description": f"The subdomain {subdomain} is protected by WAF ({waf_label}), "
                               f"but the origin server at {ip} is directly accessible. "
                               "This allows bypassing WAF protections.",
                 "url": ip_url,
@@ -514,8 +607,14 @@ def check_waf_bypass(
                 "subdomain": subdomain,
                 "subdomain_server": subdomain_server,
                 "ip_server": ip_server,
-                "evidence": f"WAF detected on subdomain ({subdomain_server}) but not on IP",
+                "evidence": evidence,
+                "detection_method": detection_method,
             }
+            if detection_method == "ai_classifier" and ai_subdomain:
+                finding["waf_type"] = ai_subdomain.get("waf_type")
+                finding["waf_confidence"] = ai_subdomain.get("confidence")
+                finding["ai_reasoning"] = ai_subdomain.get("reasoning")
+            return finding
 
         # Also check if IP returns content without Host header (direct origin exposure)
         if not subdomain_has_waf and ip_response.status_code == 200:
@@ -2160,7 +2259,11 @@ def run_security_checks(
     enabled_checks: Dict[str, bool],
     timeout: int = 10,
     tls_expiry_days: int = 30,
-    max_workers: int = 10
+    max_workers: int = 10,
+    ai_classifier_enabled: bool = False,
+    ai_model: str = '',
+    ai_user_id: str = '',
+    ai_project_id: str = '',
 ) -> Dict[str, Any]:
     """
     Run all enabled security checks on recon data.
@@ -2171,10 +2274,19 @@ def run_security_checks(
         timeout: Request/connection timeout
         tls_expiry_days: Days before TLS expiry to warn
         max_workers: Maximum concurrent workers
+        ai_classifier_enabled: Enable LLM-based WAF classification cascade.
+            When True, _has_cdn_markers and check_waf_bypass fall back to the
+            agent's /llm/waf-classify endpoint on a static-negative match.
+        ai_model: LLM model id forwarded to the agent (e.g. 'claude-opus-4-6').
+        ai_user_id, ai_project_id: Forwarded for per-user provider key resolution.
 
     Returns:
         Dictionary with security check findings
     """
+    _set_ai_ctx(ai_classifier_enabled, ai_model, ai_user_id, ai_project_id)
+    if _AI_CTX["enabled"]:
+        print(f"[*][WAF-AI] Classifier cascade enabled, model={_AI_CTX['model']}")
+
     print("\n" + "=" * 70)
     print("[*][SecurityCheck] Custom Security Checks")
     print("=" * 70)

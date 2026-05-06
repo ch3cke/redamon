@@ -8,6 +8,7 @@ import styles from '../ProjectForm.module.css'
 import { NodeInfoTooltip } from '../NodeInfoTooltip'
 import { TimeEstimate } from '../TimeEstimate'
 import { FileImportButton } from '../FileImportButton'
+import { AiToggleLabel } from '../AiToggleLabel'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
 
@@ -315,6 +316,45 @@ export function NucleiSection({ data, updateField, onRun }: NucleiSectionProps) 
           <div className={styles.subSection}>
             <h3 className={styles.subSectionTitle}>Template Tags</h3>
             <p className={styles.fieldHint} style={{ marginBottom: '0.5rem' }}>Filter templates by functionality tags</p>
+            <div className={styles.toggleRow} style={{ marginBottom: 'var(--space-2)', alignItems: 'center' }}>
+              <AiToggleLabel
+                label="Use AI for Tag Selection"
+                tooltip={
+                  'AI prunes the include-tags list per scan based on detected tech stack ' +
+                  '(drops irrelevant tags like wordpress on Node sites, adds tech-specific ' +
+                  'tags like apache when detected). When on, the static Include Tags list ' +
+                  'below is ignored. Same toggle as in the Target tab AI panel: flipping it ' +
+                  'here flips it there. Candidate tag pool is built from the live ' +
+                  'nuclei-templates volume (count >= 50, ~125 broad-category tags). ' +
+                  (!data.aiInPipeline ? 'Enable "AI in Pipeline" in the Target tab to use this.' : '')
+                }
+              />
+              <Toggle
+                checked={data.nucleiAiTags}
+                disabled={!data.aiInPipeline}
+                onChange={(checked) => updateField('nucleiAiTags', checked)}
+              />
+            </div>
+            <div className={styles.toggleRow} style={{ alignItems: 'center', gap: 'var(--space-4)', marginBottom: 'var(--space-2)' }}>
+              <AiToggleLabel
+                label="Use AI to Filter False-Positive Block Pages"
+                tooltip={
+                  "Augments Nuclei's keyword-based WAF/rate-limit detection. " +
+                  "When a finding's response carries a suspicious status code " +
+                  '(403/406/418/429/503) but no keyword matched, the LLM classifies ' +
+                  'the body as a block page or real hit. Catches rebranded WAF ' +
+                  'blocks (AWS WAF JSON, custom Imperva, Fortinet) that the static ' +
+                  'list misses, and avoids false positives where legitimate pages ' +
+                  'contain words like "WAF" or "Access Denied". ' +
+                  (!data.aiInPipeline ? 'Enable "AI in Pipeline" in the Target tab to use this.' : '')
+                }
+              />
+              <Toggle
+                checked={data.nucleiAiResponseFilter}
+                disabled={!data.aiInPipeline}
+                onChange={(checked) => updateField('nucleiAiResponseFilter', checked)}
+              />
+            </div>
             <div className={styles.fieldRow}>
               <div className={styles.fieldGroup}>
                 <label className={styles.fieldLabel}>Include Tags</label>
@@ -325,6 +365,8 @@ export function NucleiSection({ data, updateField, onRun }: NucleiSectionProps) 
                     value={(data.nucleiTags ?? []).join(', ')}
                     onChange={(e) => updateField('nucleiTags', e.target.value.split(',').map(s => s.trim()).filter(Boolean))}
                     placeholder="cve, xss, sqli, rce (empty = custom templates only)"
+                    disabled={data.nucleiAiTags}
+                    style={data.nucleiAiTags ? { opacity: 0.5 } : undefined}
                   />
                   <FileImportButton
                     fieldName="tags"
@@ -332,9 +374,15 @@ export function NucleiSection({ data, updateField, onRun }: NucleiSectionProps) 
                   />
                 </div>
                 <span className={styles.fieldHint}>
-                  Popular: cve, xss, sqli, rce, lfi, ssrf, xxe, ssti.
-                  <strong> Empty</strong> means the built-in 8000-template pool will <em>not</em> run &mdash;
-                  only the custom templates you select below. If both are empty, the detection pass is skipped.
+                  {data.nucleiAiTags ? (
+                    <>Tags chosen by AI per scan based on tech fingerprint. The static list above is ignored.</>
+                  ) : (
+                    <>
+                      Popular: cve, xss, sqli, rce, lfi, ssrf, xxe, ssti.
+                      <strong> Empty</strong> means the built-in 8000-template pool will <em>not</em> run &mdash;
+                      only the custom templates you select below. If both are empty, the detection pass is skipped.
+                    </>
+                  )}
                 </span>
               </div>
               <div className={styles.fieldGroup}>

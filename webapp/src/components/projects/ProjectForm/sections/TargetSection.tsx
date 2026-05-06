@@ -2,6 +2,7 @@
 
 import { useState, useMemo } from 'react'
 import { ChevronDown, Target, ShieldAlert, AlertTriangle, Sparkles } from 'lucide-react'
+import { AiToggleLabel } from '../AiToggleLabel'
 import { Toggle, WikiInfoButton } from '@/components/ui'
 import type { Project } from '@prisma/client'
 import { isHardBlockedDomain } from '@/lib/hard-guardrail'
@@ -290,18 +291,18 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
                   <Sparkles size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
                   AI in Pipeline
                 </h3>
-                <div className={styles.toggleRow} style={{ gap: 'var(--space-4)' }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <span className={styles.toggleLabel}>Enable AI in Pipeline</span>
-                    <p className={styles.toggleDescription}>
-                      Master switch that unlocks every per-tool AI toggle below.
-                      When OFF, all per-tool AI flags are forced OFF and disabled,
-                      no LLM calls are made by the recon pipeline. When ON, each
-                      per-tool toggle becomes editable and individual AI hooks can
-                      be turned on or off independently. Pick the model used by
-                      every hook just below.
-                    </p>
-                  </div>
+                <div className={styles.toggleRow} style={{ gap: 'var(--space-4)', alignItems: 'center' }}>
+                  <AiToggleLabel
+                    label="Enable AI in Pipeline"
+                    tooltip={
+                      'Master switch that unlocks every per-tool AI toggle below. ' +
+                      'When OFF, all per-tool AI flags are forced OFF and disabled, ' +
+                      'no LLM calls are made by the recon pipeline. When ON, each ' +
+                      'per-tool toggle becomes editable and individual AI hooks can ' +
+                      'be turned on or off independently. Pick the model used by ' +
+                      'every hook just below.'
+                    }
+                  />
                   <Toggle
                     checked={data.aiInPipeline}
                     onChange={(checked) => {
@@ -309,6 +310,10 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
                       // When master flips, cascade to every per-tool flag so the
                       // form state matches the backend defense-in-depth contract.
                       updateField('ffufAiExtensions', checked)
+                      updateField('nucleiAiTags', checked)
+                      updateField('wafAiClassifier', checked)
+                      updateField('nucleiAiResponseFilter', checked)
+                      updateField('takeoverAiClassifier', checked)
                     }}
                   />
                 </div>
@@ -332,30 +337,82 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
 
                     {/* Per-tool AI toggles. Each one mirrors the toggle in its tool
                         section, sharing the same form field, so flipping either
-                        place updates both. Add new entries here as more tools gain
-                        AI hooks. */}
-                    <div style={{ marginTop: 'var(--space-4)' }}>
-                      <div className={styles.toggleRow} style={{ gap: 'var(--space-4)' }}>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <span className={styles.toggleLabel}>FFuf: Use AI for Extensions</span>
-                          <p className={styles.toggleDescription}>
-                            For each fuzz target, FFuf first sends a single HEAD
-                            request and asks the configured model to suggest the
-                            most likely file extensions based on the response
-                            headers (Server, X-Powered-By, X-AspNet-Version).
-                            The static FFuf extensions list in the FFuf module is
-                            ignored when this is on. Same toggle as in the FFuf
-                            module: flipping it here flips it there. A
-                            per-fingerprint cache means N hosts behind the same
-                            stack collapse to one LLM call.
-                          </p>
+                        place updates both. The list lives inside a fixed-height
+                        scroll container so adding more hooks doesn't push the
+                        rest of the form down. Descriptions are rendered as
+                        native title-attribute tooltips on the info icon to
+                        keep each row compact. Add new entries to the
+                        `aiPipelineHooks` array below as more tools gain AI
+                        hooks -- no JSX changes needed. */}
+                    {(() => {
+                      const aiPipelineHooks: Array<{
+                        field: 'ffufAiExtensions' | 'nucleiAiTags' | 'wafAiClassifier' | 'nucleiAiResponseFilter' | 'takeoverAiClassifier'
+                        label: string
+                        description: string
+                      }> = [
+                        {
+                          field: 'ffufAiExtensions',
+                          label: 'FFuf: Use AI for Extensions',
+                          description: 'For each fuzz target, FFuf first sends a single HEAD request and asks the configured model to suggest the most likely file extensions based on the response headers (Server, X-Powered-By, X-AspNet-Version). The static FFuf extensions list in the FFuf module is ignored when this is on. Same toggle as in the FFuf module: flipping it here flips it there. A per-fingerprint cache means N hosts behind the same stack collapse to one LLM call.',
+                        },
+                        {
+                          field: 'nucleiAiTags',
+                          label: 'Nuclei: Use AI for Tag Selection',
+                          description: 'Once per scan, Nuclei aggregates the detected tech stack from http_probe (Wappalyzer + Server headers) and asks the configured model to prune its include-tags list to ones matching the stack. Drops irrelevant tags like wordpress on Node sites, adds tech-specific ones like apache or wp-plugin when detected. The static Include Tags list in the Nuclei module is ignored when this is on. Same toggle as in the Nuclei module: flipping it here flips it there. Candidate tag pool is built from the live nuclei-templates volume (count >= 50, ~125 broad-category tags).',
+                        },
+                        {
+                          field: 'wafAiClassifier',
+                          label: 'Security Checks: Use AI for WAF Classification',
+                          description: 'Augments the static WAF/CDN header-token check used by the Direct IP and WAF Bypass checks. When the static list misses (modern WAFs strip or rebrand their headers), the response gets a second pass through the configured model, which scores WAF presence 0-100 from headers, body fingerprints, cookies, and latency. Same toggle as in the Security Checks module: flipping it here flips it there. A per-response fingerprint cache collapses identical responses to one LLM call.',
+                        },
+                        {
+                          field: 'nucleiAiResponseFilter',
+                          label: 'Nuclei: Use AI to Filter False-Positive Block Pages',
+                          description: "Augments the keyword-based WAF/rate-limit detection inside Nuclei's false-positive filter. When the static list misses (rebranded WAF blocks, AWS WAF JSON errors, custom Fortinet pages) but the response still looks like a block (suspicious status code on an injection finding), the LLM classifies the body as block-page or real hit. Suppresses fake findings and exposes real ones the keyword filter wrongly hides. Same toggle as in the Nuclei module: flipping it here flips it there. Per-response fingerprint cache keeps cost bounded.",
+                        },
+                        {
+                          field: 'takeoverAiClassifier',
+                          label: 'Takeover: Use AI to Disambiguate WAF "No-Host" Pages',
+                          description: "Subjack/Nuclei takeover fingerprints can collide with WAF block pages that say \"not found\" for a hostname the WAF doesn't recognize. When AI is on, each takeover candidate is probed; if the response carries no third-party vendor token (Heroku-Request-Id, x-amz-bucket-region, etc.), the LLM classifies the body as a real unclaimed-service page or a WAF block. AI-flagged collisions get a -40 score penalty so they land in manual_review instead of being shipped as criticals. Same toggle as in the Subdomain Takeover module: flipping it here flips it there.",
+                        },
+                      ]
+                      return (
+                        <div
+                          style={{
+                            marginTop: 'var(--space-4)',
+                            maxHeight: 240,
+                            overflowY: 'auto',
+                            border: '1px solid var(--border-subtle, #2a2a2a)',
+                            borderRadius: 'var(--radius-2, 6px)',
+                            padding: 'var(--space-2, 8px) var(--space-3, 12px)',
+                            background: 'var(--surface-1, transparent)',
+                          }}
+                        >
+                          {aiPipelineHooks.map((hook, idx) => (
+                            <div
+                              key={hook.field}
+                              className={styles.toggleRow}
+                              style={{
+                                gap: 'var(--space-3)',
+                                paddingTop: idx === 0 ? 0 : 'var(--space-2, 8px)',
+                                paddingBottom: 'var(--space-2, 8px)',
+                                borderTop: idx === 0 ? 'none' : '1px solid var(--border-subtle, #222)',
+                                alignItems: 'center',
+                              }}
+                            >
+                              <AiToggleLabel
+                                label={hook.label}
+                                tooltip={hook.description}
+                              />
+                              <Toggle
+                                checked={data[hook.field]}
+                                onChange={(checked) => updateField(hook.field, checked)}
+                              />
+                            </div>
+                          ))}
                         </div>
-                        <Toggle
-                          checked={data.ffufAiExtensions}
-                          onChange={(checked) => updateField('ffufAiExtensions', checked)}
-                        />
-                      </div>
-                    </div>
+                      )
+                    })()}
                   </>
                 )}
               </div>

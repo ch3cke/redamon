@@ -170,6 +170,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     'NUCLEI_SCAN_ALL_IPS': False,
     'NUCLEI_INTERACTSH': True,
     'NUCLEI_DOCKER_IMAGE': 'projectdiscovery/nuclei:latest',
+    'NUCLEI_AI_TAGS': False,
+    # Cascade-gated by AI_IN_PIPELINE. When on, is_false_positive() falls
+    # back to the agent's /llm/nuclei-fp-filter endpoint when the keyword
+    # WAF block list misses but the response still looks like a block.
+    'NUCLEI_AI_RESPONSE_FILTER': False,
 
     # Subdomain Takeover Scanner (Subjack + Nuclei takeover templates)
     # Runs in GROUP 6 Phase A alongside Nuclei; writes Vulnerability nodes
@@ -191,6 +196,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     'TAKEOVER_RATE_LIMIT': 50,
     'TAKEOVER_MANUAL_REVIEW_AUTO_PUBLISH': False,
     'TAKEOVER_CNAME_VALIDATION_ENABLED': True,
+    # Cascade-gated by AI_IN_PIPELINE. When on, takeover findings whose
+    # response carries no third-party vendor token get an LLM second pass
+    # to disambiguate genuine "service unclaimed" pages from WAF block
+    # pages that match the same static fingerprint.
+    'TAKEOVER_AI_CLASSIFIER': False,
     # BadDNS (AGPL-3.0, isolated sidecar — disabled by default, opt-in)
     'BADDNS_ENABLED': False,
     'BADDNS_DOCKER_IMAGE': 'redamon-baddns:latest',
@@ -432,6 +442,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     'SECURITY_CHECK_DIRECT_IP_HTTPS': True,
     'SECURITY_CHECK_IP_API_EXPOSED': True,
     'SECURITY_CHECK_WAF_BYPASS': True,
+    # Cascade-gated by AI_IN_PIPELINE. When on, _has_cdn_markers() and
+    # check_waf_bypass() fall back to the agent's /llm/waf-classify endpoint
+    # if the static Server/header token check returns no match.
+    'WAF_AI_CLASSIFIER': False,
     'SECURITY_CHECK_TLS_EXPIRING_SOON': True,
     'SECURITY_CHECK_TLS_EXPIRY_DAYS': 30,
     'SECURITY_CHECK_MISSING_REFERRER_POLICY': True,
@@ -794,6 +808,8 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['NUCLEI_SCAN_ALL_IPS'] = project.get('nucleiScanAllIps', DEFAULT_SETTINGS['NUCLEI_SCAN_ALL_IPS'])
     settings['NUCLEI_INTERACTSH'] = project.get('nucleiInteractsh', DEFAULT_SETTINGS['NUCLEI_INTERACTSH'])
     settings['NUCLEI_DOCKER_IMAGE'] = project.get('nucleiDockerImage', DEFAULT_SETTINGS['NUCLEI_DOCKER_IMAGE'])
+    settings['NUCLEI_AI_TAGS'] = project.get('nucleiAiTags', DEFAULT_SETTINGS['NUCLEI_AI_TAGS'])
+    settings['NUCLEI_AI_RESPONSE_FILTER'] = project.get('nucleiAiResponseFilter', DEFAULT_SETTINGS['NUCLEI_AI_RESPONSE_FILTER'])
 
     # Subdomain Takeover Scanner
     settings['SUBDOMAIN_TAKEOVER_ENABLED'] = project.get('subdomainTakeoverEnabled', DEFAULT_SETTINGS['SUBDOMAIN_TAKEOVER_ENABLED'])
@@ -812,6 +828,7 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['TAKEOVER_CONFIDENCE_THRESHOLD'] = project.get('takeoverConfidenceThreshold', DEFAULT_SETTINGS['TAKEOVER_CONFIDENCE_THRESHOLD'])
     settings['TAKEOVER_RATE_LIMIT'] = project.get('takeoverRateLimit', DEFAULT_SETTINGS['TAKEOVER_RATE_LIMIT'])
     settings['TAKEOVER_MANUAL_REVIEW_AUTO_PUBLISH'] = project.get('takeoverManualReviewAutoPublish', DEFAULT_SETTINGS['TAKEOVER_MANUAL_REVIEW_AUTO_PUBLISH'])
+    settings['TAKEOVER_AI_CLASSIFIER'] = project.get('takeoverAiClassifier', DEFAULT_SETTINGS['TAKEOVER_AI_CLASSIFIER'])
     settings['BADDNS_ENABLED'] = project.get('baddnsEnabled', DEFAULT_SETTINGS['BADDNS_ENABLED'])
     settings['BADDNS_DOCKER_IMAGE'] = project.get('baddnsDockerImage', DEFAULT_SETTINGS['BADDNS_DOCKER_IMAGE'])
     settings['BADDNS_MODULES'] = project.get('baddnsModules', DEFAULT_SETTINGS['BADDNS_MODULES'])
@@ -1001,6 +1018,7 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['SECURITY_CHECK_DIRECT_IP_HTTPS'] = project.get('securityCheckDirectIpHttps', DEFAULT_SETTINGS['SECURITY_CHECK_DIRECT_IP_HTTPS'])
     settings['SECURITY_CHECK_IP_API_EXPOSED'] = project.get('securityCheckIpApiExposed', DEFAULT_SETTINGS['SECURITY_CHECK_IP_API_EXPOSED'])
     settings['SECURITY_CHECK_WAF_BYPASS'] = project.get('securityCheckWafBypass', DEFAULT_SETTINGS['SECURITY_CHECK_WAF_BYPASS'])
+    settings['WAF_AI_CLASSIFIER'] = project.get('wafAiClassifier', DEFAULT_SETTINGS['WAF_AI_CLASSIFIER'])
     settings['SECURITY_CHECK_TLS_EXPIRING_SOON'] = project.get('securityCheckTlsExpiringSoon', DEFAULT_SETTINGS['SECURITY_CHECK_TLS_EXPIRING_SOON'])
     settings['SECURITY_CHECK_TLS_EXPIRY_DAYS'] = project.get('securityCheckTlsExpiryDays', DEFAULT_SETTINGS['SECURITY_CHECK_TLS_EXPIRY_DAYS'])
     settings['SECURITY_CHECK_MISSING_REFERRER_POLICY'] = project.get('securityCheckMissingReferrerPolicy', DEFAULT_SETTINGS['SECURITY_CHECK_MISSING_REFERRER_POLICY'])
@@ -1527,16 +1545,26 @@ def apply_ai_pipeline_overrides(settings: dict[str, Any]) -> dict[str, Any]:
     When False, every per-tool AI flag is forced OFF (defense-in-depth against
     drift between master and per-tool fields).
 
-    Today only FFUF_AI_EXTENSIONS is governed by this cascade; future per-tool
-    AI flags should be added to both branches.
+    Currently FFUF_AI_EXTENSIONS, NUCLEI_AI_TAGS, WAF_AI_CLASSIFIER,
+    NUCLEI_AI_RESPONSE_FILTER and TAKEOVER_AI_CLASSIFIER are governed by
+    this cascade; future per-tool AI flags should be added to both branches.
     """
     if not settings.get('AI_IN_PIPELINE', False):
         settings['FFUF_AI_EXTENSIONS'] = False
+        settings['NUCLEI_AI_TAGS'] = False
+        settings['WAF_AI_CLASSIFIER'] = False
+        settings['NUCLEI_AI_RESPONSE_FILTER'] = False
+        settings['TAKEOVER_AI_CLASSIFIER'] = False
         return settings
 
     settings['FFUF_AI_EXTENSIONS'] = True
+    settings['NUCLEI_AI_TAGS'] = True
+    settings['WAF_AI_CLASSIFIER'] = True
+    settings['NUCLEI_AI_RESPONSE_FILTER'] = True
+    settings['TAKEOVER_AI_CLASSIFIER'] = True
     logger.info(
-        "AI in pipeline enabled, model=%s, FFuf=AI-extensions",
+        "AI in pipeline enabled, model=%s, FFuf=AI-extensions, Nuclei=AI-tags, "
+        "WAF=AI-classifier, Nuclei-FP=AI-response-filter, Takeover=AI-classifier",
         settings.get('AI_PIPELINE_MODEL', 'claude-opus-4-6'),
     )
     return settings

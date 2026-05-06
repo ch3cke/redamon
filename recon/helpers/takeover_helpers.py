@@ -668,6 +668,9 @@ def score_finding(
              (the SaaS edge is up and serving the legit customer; auto-
              exploitable providers wildcard-resolve so this rule excludes
              them)
+        -40  ai_waf_likely (the AI classifier identified the response as a
+             WAF block page disguised as a third-party SaaS unclaimed page —
+             strong signal of a fingerprint collision)
 
     verdict:
         confirmed      if score >= threshold + 10
@@ -706,6 +709,8 @@ def score_finding(
         score -= 25
     if cname_alive and provider not in AUTO_EXPLOITABLE_PROVIDERS:
         score -= 30
+    if finding.get("ai_waf_likely"):
+        score -= 40
 
     score = max(0, min(100, score))
 

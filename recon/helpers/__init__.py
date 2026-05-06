@@ -44,6 +44,7 @@ from .nuclei_helpers import (
     build_nuclei_command,
     parse_nuclei_finding,
     is_false_positive,
+    set_fp_ai_ctx,
 )
 
 # Katana web crawler
@@ -125,6 +126,7 @@ __all__ = [
     "build_nuclei_command",
     "parse_nuclei_finding",
     "is_false_positive",
+    "set_fp_ai_ctx",
     # Katana
     "run_katana_crawler",
     # CVE

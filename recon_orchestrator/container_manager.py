@@ -246,6 +246,10 @@ class ContainerManager:
                     # JS Recon shared volumes with webapp
                     "redamon_js_recon_uploads": {"bind": "/data/js-recon-uploads", "mode": "ro"},
                     "redamon_js_recon_custom": {"bind": "/data/js-recon-custom", "mode": "ro"},
+                    # Official nuclei-templates volume (read-only) for the AI tag
+                    # selector to read TEMPLATES-STATS.json. Populated by
+                    # ensure_templates_volume() before any nuclei pass.
+                    "nuclei-templates": {"bind": "/opt/nuclei-templates-official", "mode": "ro"},
                 },
                 command="python /app/recon/main.py",
             )
@@ -755,6 +759,9 @@ class ContainerManager:
                     # JS Recon shared volumes with webapp (uploaded files + custom patterns)
                     "redamon_js_recon_uploads": {"bind": "/data/js-recon-uploads", "mode": "ro"},
                     "redamon_js_recon_custom": {"bind": "/data/js-recon-custom", "mode": "ro"},
+                    # Official nuclei-templates volume (read-only) for the AI tag
+                    # selector to read TEMPLATES-STATS.json.
+                    "nuclei-templates": {"bind": "/opt/nuclei-templates-official", "mode": "ro"},
                 },
                 command="python /app/recon/partial_recon.py",
             )

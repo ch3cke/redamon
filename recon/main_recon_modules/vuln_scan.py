@@ -19,6 +19,7 @@ Supports proxy/Tor for anonymous scanning.
 import copy
 import ipaddress
 import json
+import os
 import subprocess
 from pathlib import Path
 from datetime import datetime
@@ -34,6 +35,21 @@ def _url_host_is_ip(url: str) -> bool:
         return True
     except (ValueError, TypeError):
         return False
+
+
+def _build_tech_fingerprint(http_probe: dict) -> dict:
+    """Aggregate Wappalyzer technologies and Server headers from http_probe
+    into a single fingerprint for the Nuclei AI tag selector."""
+    techs, servers = set(), set()
+    for entry in (http_probe.get('by_url') or {}).values():
+        for t in (entry.get('technologies') or []):
+            techs.add(str(t).lower())
+        srv = (entry.get('server') or '').lower().split('/')[0].strip()
+        if srv:
+            servers.add(srv)
+    for k in (http_probe.get('technologies_found') or {}).keys():
+        techs.add(str(k).lower())
+    return {"technologies": sorted(techs), "servers": sorted(servers)}
 
 # Add project root to path for imports
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -57,6 +73,7 @@ from recon.helpers import (
     build_nuclei_command,
     parse_nuclei_finding,
     is_false_positive,
+    set_fp_ai_ctx,
     # CVE lookup
     run_cve_lookup,
     # Security checks
@@ -189,6 +206,10 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
     NUCLEI_SCAN_ALL_IPS = settings.get('NUCLEI_SCAN_ALL_IPS', False)
     NUCLEI_INTERACTSH = settings.get('NUCLEI_INTERACTSH', True)
     NUCLEI_DOCKER_IMAGE = settings.get('NUCLEI_DOCKER_IMAGE', 'projectdiscovery/nuclei:latest')
+    NUCLEI_AI_TAGS = settings.get('NUCLEI_AI_TAGS', False)
+    WAF_AI_CLASSIFIER = settings.get('WAF_AI_CLASSIFIER', False)
+    NUCLEI_AI_RESPONSE_FILTER = settings.get('NUCLEI_AI_RESPONSE_FILTER', False)
+    AI_PIPELINE_MODEL = settings.get('AI_PIPELINE_MODEL', 'claude-opus-4-6')
     USE_TOR_FOR_RECON = settings.get('USE_TOR_FOR_RECON', False)
     KATANA_DEPTH = settings.get('KATANA_DEPTH', 2)
     NUCLEI_AUTO_UPDATE_TEMPLATES = settings.get('NUCLEI_AUTO_UPDATE_TEMPLATES', True)
@@ -315,6 +336,7 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
                 ("NUCLEI_FOLLOW_REDIRECTS", "Network"),
                 ("NUCLEI_MAX_REDIRECTS", "Network"),
                 ("NUCLEI_INTERACTSH", "Network"),
+                ("NUCLEI_AI_TAGS", "AI cascade"),
                 ("NUCLEI_AUTO_UPDATE_TEMPLATES", "Templates lifecycle"),
                 ("NUCLEI_SCAN_ALL_IPS", "Targeting"),
                 ("KATANA_DEPTH", "Targeting"),
@@ -375,7 +397,46 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
     
         # Build target URLs using httpx/naabu data if available
         target_urls = build_target_urls(hostnames, ips, recon_data, scan_all_ips=NUCLEI_SCAN_ALL_IPS)
-    
+
+        # Initialize the per-scan AI context for the false-positive response
+        # filter. Consumed by is_false_positive() in _execute_nuclei_pass().
+        # Safe to call unconditionally -- when off, the cascade is a no-op.
+        set_fp_ai_ctx(
+            enabled=NUCLEI_AI_RESPONSE_FILTER,
+            model=AI_PIPELINE_MODEL,
+            user_id=os.environ.get('USER_ID', ''),
+            project_id=os.environ.get('PROJECT_ID', ''),
+        )
+        if NUCLEI_AI_RESPONSE_FILTER:
+            print(f"[*][Nuclei-FP-AI] Response filter cascade enabled, model={AI_PIPELINE_MODEL}")
+
+        # AI tag pruning (cascade-gated; replaces NUCLEI_TAGS with a tech-aware
+        # subset chosen by an LLM based on http_probe fingerprint). Applies to
+        # the detection pass only; the DAST pass ignores tags by design.
+        ai_tags_used = False
+        if NUCLEI_AI_TAGS and NUCLEI_TAGS:
+            from recon.helpers.ai_planner.nuclei_tags import get_ai_tags
+            tech_fp = _build_tech_fingerprint(recon_data.get('http_probe', {}))
+            fallback_urls = (
+                target_urls if not tech_fp['technologies'] and not tech_fp['servers']
+                else None
+            )
+            ai_tags = get_ai_tags(
+                tech_fingerprint=tech_fp,
+                current_tags=NUCLEI_TAGS,
+                model=AI_PIPELINE_MODEL,
+                user_id=os.environ.get('USER_ID', ''),
+                project_id=os.environ.get('PROJECT_ID', ''),
+                fallback_urls=fallback_urls,
+            )
+            if ai_tags != NUCLEI_TAGS:
+                ai_tags_used = True
+                print(f"[*][Nuclei-AI] Tag pruning: {len(NUCLEI_TAGS)} -> {len(ai_tags)} tags")
+                print(f"[*][Nuclei-AI] Selected: {ai_tags}")
+                NUCLEI_TAGS = ai_tags
+            else:
+                print(f"[*][Nuclei-AI] Falling back to user tags (no signal or LLM unavailable)")
+
         # For DAST mode, we need URLs with parameters from resource_enum
         dast_urls = []
         if NUCLEI_DAST_MODE:
@@ -607,6 +668,7 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
                     "anonymous_mode": use_proxy,
                     "severity_filter": NUCLEI_SEVERITY,
                     "tags_filter": NUCLEI_TAGS,
+                    "tags_ai_selected": ai_tags_used,
                     "exclude_tags": NUCLEI_EXCLUDE_TAGS,
                     "rate_limit": NUCLEI_RATE_LIMIT,
                     "dast_mode": NUCLEI_DAST_MODE,
@@ -896,7 +958,11 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
                 enabled_checks=security_checks_enabled,
                 timeout=SECURITY_CHECK_TIMEOUT,
                 tls_expiry_days=SECURITY_CHECK_TLS_EXPIRY_DAYS,
-                max_workers=SECURITY_CHECK_MAX_WORKERS
+                max_workers=SECURITY_CHECK_MAX_WORKERS,
+                ai_classifier_enabled=WAF_AI_CLASSIFIER,
+                ai_model=AI_PIPELINE_MODEL,
+                ai_user_id=os.environ.get('USER_ID', ''),
+                ai_project_id=os.environ.get('PROJECT_ID', ''),
             )
 
             # Merge security checks into vuln_scan results

@@ -1102,6 +1102,36 @@ class VulnMixin:
             except Exception as e:
                 stats["errors"].append(f"Orphan BaseURL cleanup failed: {e}")
 
+            # Apex / root-domain pass.
+            # Security checks (and Nuclei templates that target the bare domain)
+            # produce findings for URLs like https://example.com -- the host is
+            # the Domain itself, not a Subdomain. The Subdomain-only cleanup
+            # above can't link those, so we attach them directly to the Domain
+            # node. Skips BaseURLs already attached via Subdomain or via the
+            # httpx Service -[:SERVES_URL]-> path.
+            try:
+                apex_result = session.run(
+                    """
+                    MATCH (bu:BaseURL {user_id: $user_id, project_id: $project_id})
+                    WHERE NOT (bu)<-[:SERVES_URL]-()
+                      AND NOT (:Subdomain)-[:HAS_BASE_URL]->(bu)
+                      AND NOT (:Domain)-[:HAS_BASE_URL]->(bu)
+                    WITH bu,
+                         split(split(replace(replace(bu.url, 'https://', ''), 'http://', ''), '/')[0], ':')[0] AS bu_host
+                    MATCH (d:Domain {user_id: $user_id, project_id: $project_id})
+                    WHERE d.name = bu_host
+                    MERGE (d)-[:HAS_BASE_URL]->(bu)
+                    RETURN count(*) AS linked
+                    """,
+                    user_id=user_id, project_id=project_id
+                )
+                apex_linked = apex_result.single()["linked"]
+                if apex_linked > 0:
+                    print(f"[+][graph-db] Linked {apex_linked} apex BaseURL(s) to Domain (vuln_scan)")
+                    stats["relationships_created"] += apex_linked
+            except Exception as e:
+                stats["errors"].append(f"Apex BaseURL cleanup failed: {e}")
+
             print(f"[+][graph-db] Created {stats['endpoints_created']} Endpoint nodes")
             print(f"[+][graph-db] Created {stats['parameters_created']} Parameter nodes")
             print(f"[+][graph-db] Created {stats['vulnerabilities_created']} Vulnerability nodes")

@@ -111,6 +111,8 @@ def run_subdomain_takeover(
     nuclei_takeovers_enabled = settings.get("NUCLEI_TAKEOVERS_ENABLED", True)
     confidence_threshold = int(settings.get("TAKEOVER_CONFIDENCE_THRESHOLD", 60))
     manual_review_auto_publish = bool(settings.get("TAKEOVER_MANUAL_REVIEW_AUTO_PUBLISH", False))
+    ai_classifier_enabled = bool(settings.get("TAKEOVER_AI_CLASSIFIER", False))
+    ai_pipeline_model = settings.get("AI_PIPELINE_MODEL", "claude-opus-4-6")
 
     # --------------------------------------------------------------
     # 1. Target collection
@@ -225,6 +227,29 @@ def run_subdomain_takeover(
                     # Probe failure is non-fatal -- leave fields unset so the
                     # scorer treats DNS state as unknown.
                     print(f"[!][Takeover] CNAME probe failed for {cname}: {e}")
+
+        # --------------------------------------------------------------
+        # 3b. AI cascade: WAF-block disambiguation
+        # --------------------------------------------------------------
+        # Subjack/Nuclei body fingerprints collide with WAF "no host" pages.
+        # When AI is enabled, probe each finding's hostname, short-circuit on
+        # third-party vendor tokens (proves the response is from the SaaS),
+        # and otherwise ask the LLM to classify the body. AI verdict feeds
+        # ai_waf_likely back into score_finding() which subtracts 40 points
+        # so AI-flagged collisions land in manual_review.
+        if ai_classifier_enabled and ai_pipeline_model and normalized:
+            print(f"[*][Takeover-AI] Classifier cascade enabled, model={ai_pipeline_model}")
+            try:
+                _apply_ai_waf_disambiguation(
+                    findings=normalized,
+                    model=ai_pipeline_model,
+                    user_id=os.environ.get("USER_ID", ""),
+                    project_id=os.environ.get("PROJECT_ID", ""),
+                )
+            except Exception as e:
+                # Never let AI failure abort the takeover scan -- emit warning
+                # and continue with the static findings.
+                print(f"[!][Takeover-AI] Cascade pass failed: {e}")
 
         # --------------------------------------------------------------
         # 4. Dedupe + score
@@ -734,6 +759,112 @@ def _lookup_cname_from_dns(dns_data: dict, hostname: str) -> Optional[str]:
     if isinstance(cname, str) and cname.strip():
         return cname.strip(".").lower()
     return None
+
+
+def _probe_for_ai_disambiguation(hostname: str, timeout: int = 10):
+    """
+    Probe `hostname` and capture the response so the AI classifier has
+    something to look at. Returns (status_code, headers_dict, body_text)
+    or (None, {}, "") on any error -- callers must handle the empty
+    case (no signal -> skip AI for this finding).
+
+    Tries HTTPS first, falls back to HTTP. Caps body to 4KB (the AI helper
+    re-trims to 4KB anyway, so capturing more is wasted memory).
+    Catches every exception class -- a probe failure must NEVER abort the
+    takeover scan.
+    """
+    import requests
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    schemes = ("https", "http")
+    headers_base = {"User-Agent": "Mozilla/5.0 (compatible; RedAmon/4.7)"}
+    for scheme in schemes:
+        try:
+            r = requests.get(
+                f"{scheme}://{hostname}/",
+                timeout=timeout,
+                allow_redirects=True,
+                verify=False,
+                headers=headers_base,
+            )
+            try:
+                body = (r.text or "")[:4096]
+            except Exception:
+                body = ""
+            return r.status_code, dict(r.headers or {}), body
+        except Exception:
+            # RequestException covers most network failures. Catch broader
+            # to also handle SSLError-during-handshake-with-bytes-in-message,
+            # MemoryError on huge responses, decoding edge cases, etc.
+            continue
+    return None, {}, ""
+
+
+def _apply_ai_waf_disambiguation(
+    findings: list[dict],
+    model: str,
+    user_id: str,
+    project_id: str,
+) -> None:
+    """
+    For each takeover finding, probe the hostname, short-circuit on
+    third-party vendor tokens, and otherwise classify the response with
+    the AI. Mutates each finding in-place to add ai_waf_likely +
+    ai_confidence + ai_reasoning when the AI flags a collision at
+    confidence >= 70. Never raises.
+    """
+    from recon.helpers.ai_planner.takeover_classifier import (
+        classify_takeover_response,
+        has_third_party_vendor_token,
+    )
+
+    cache: dict = {}
+    AI_THRESHOLD = 70
+
+    for finding in findings:
+        # Per-finding try/except: one bad probe / classification must not
+        # abort the whole disambiguation pass.
+        try:
+            hostname = (finding.get("hostname") or "").strip()
+            if not hostname:
+                continue
+
+            status, headers, body = _probe_for_ai_disambiguation(hostname)
+            if status is None:
+                # Probe failed (DNS/connect) -- can't classify, leave the
+                # finding to the static pipeline. Most NXDOMAIN takeover
+                # cases land here; that's correct behavior (no response =
+                # no WAF interaction = static signal stands).
+                continue
+
+            # Short-circuit: if the response carries an unambiguous SaaS
+            # vendor token, the third-party fingerprint is genuine -- skip
+            # the AI call to save cost.
+            if has_third_party_vendor_token(headers):
+                print(f"[*][Takeover-AI] {hostname}: third-party vendor token present, skipping AI")
+                continue
+
+            result = classify_takeover_response(
+                hostname=hostname,
+                expected_provider=finding.get("takeover_provider") or "",
+                response_text=body,
+                status_code=status,
+                headers=headers,
+                model=model,
+                cache=cache,
+                user_id=user_id,
+                project_id=project_id,
+            )
+            if result.get("source") == "ai_unavailable":
+                continue
+            if result.get("is_waf_block") and result.get("confidence", 0) >= AI_THRESHOLD:
+                finding["ai_waf_likely"] = True
+                finding["ai_confidence"] = int(result["confidence"])
+                finding["ai_reasoning"] = result.get("reason") or ""
+        except Exception as e:
+            print(f"[!][Takeover-AI] disambiguation failed for {finding.get('hostname','?')}: {e}")
+            continue
 
 
 def _empty_result(reason: str = "") -> dict:
