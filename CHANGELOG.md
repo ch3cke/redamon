@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 
+## [4.8.1] - 2026-05-09
+
+### Fixed
+
+- **Webapp build segfault on Kali / Debian 12 hosts** ([webapp/Dockerfile](webapp/Dockerfile)) -- `npm ci` crashed with `exit code: 139` (SIGSEGV) during the `prisma generate` postinstall step on `node:22-alpine`. Prisma 6.x query/schema engines link against glibc + OpenSSL 3 and intermittently segfault on Alpine's musl, even with `libc6-compat`. Switched all three build stages (deps / builder / runner) to `node:22-slim`, replaced `apk add libc6-compat` with `apt-get install openssl ca-certificates`, swapped busybox `addgroup`/`adduser` for shadow-utils `groupadd`/`useradd`, and added `wget` to the runner so `redamon.sh`'s `/api/health` probe still works. Image grows ~80-120 MB but the build is now deterministic across host kernels and Docker versions. Reported in [#103](https://github.com/samugit83/redamon/issues/103)
+
+### Changed
+
+- **Knowledge Base is now opt-in at install** ([redamon.sh:516-555](redamon.sh#L516-L555)) -- `./redamon.sh install` now runs lightweight by default (no GVM, no local KB, Tavily-only web search). Pass `--kbase` to enable the local Knowledge Base. The legacy `--skipkbase` flag is removed. The `.skipkbase` flag-file path and `is_skipkbase()` helper are kept internally so `update` / `up` / `up dev` are **invariant for existing installs**: pre-existing KB-on installs (no flag file) keep KB on across `update`; pre-existing KB-off installs (flag file present) keep it off
+- **README + Knowledge Base wiki page** updated to document the opt-in default and the `--kbase` flag
+
+---
+
+
 ## [4.8.0] - 2026-05-06
 
 ### Added — AI in Pipeline (5 hooks)
