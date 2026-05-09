@@ -8,6 +8,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 
+## [4.9.0] - 2026-05-09
+
+### Added — MCP Tool Plugins (Global Settings → MCP Tool Plugins tab)
+
+Plug **any Model-Context-Protocol server** into the agent as a *tool plugin* — Shodan, GitHub, Censys, Hugging Face, mitmproxy, Burp Suite, your own internal MCPs — without editing code, rebuilding containers, or running database migrations. The product term **MCP Tool Plugin** disambiguates these from the 5 baseline system MCP servers shipped in kali-sandbox. Tools auto-inject into the agent's system prompt within ~1 second of save and surface in every project's Tool Matrix with phase toggles. Three transports supported: `stdio`, `sse`, `streamable_http`.
+
+#### Webapp UI
+
+- **New "MCP Tool Plugins" tab** in Global Settings ([webapp/src/app/settings/page.tsx](webapp/src/app/settings/page.tsx), [webapp/src/components/settings/mcp/](webapp/src/components/settings/mcp/)) — list view, add/edit form, delete with themed confirmation modal (no native browser dialogs), enable toggle, transport pill, tool count
+- **39 prefilled Quick Add presets** ([webapp/src/lib/mcp/presets.ts](webapp/src/lib/mcp/presets.ts)) covering OSINT (Shodan, VirusTotal, Censys, Hunter.io, HIBP, OSINT Toolkit with 37 tools, Brave/Tavily/Exa/DuckDuckGo search), security (Semgrep SAST, Snyk, OWASP ZAP, Trivy, CVE Intel with NVD+EPSS+KEV+ATT&CK, Threat Intel bundle), cloud (AWS, Kubernetes, Prowler), web (Puppeteer, Browserbase, mitmproxy), utility (Notion, Slack, Linear, Memory, Sequential Thinking, Filesystem), reverse-engineering (Ghidra), reporting / payments (Stripe). Click → form opens prefilled with everything except the secret. Vertical scroll, max 360px
+- **"Discover and add new tools" button** (orange, top of form) — runs a one-off MCP `list_tools()` against the draft, returns within 30s, auto-imports into a scrollable table (sticky header, 320px cap). Per-row "+ Add" or one-click "+ add all". Auto-fills all 5 LLM-bound fields including `args_format` derived from each tool's JSON Schema (types, enums, defaults, min/max, format hints, per-property descriptions)
+- **"Add Tool Manually" button** — alternative to discovery, repositioned to the *Tools (n)* header for visibility
+- **`→ injected in LLM prompt` badges** next to every LLM-bound field (name / purpose / when_to_use / args_format / description) with hover tooltips explaining which prompt section each lands in
+- **Bearer-token field** with eye-toggle visibility, password input by default, masked on display (`••••••••<last4>`), preserves the literal on edits when the user doesn't touch it. Token is stored as plaintext in the DB and sent verbatim as `Authorization: Bearer <token>` to the upstream MCP — no string substitution
+- **Project Tool Matrix integration** ([webapp/src/components/projects/ProjectForm/sections/ToolMatrixSection.tsx](webapp/src/components/projects/ProjectForm/sections/ToolMatrixSection.tsx)) — installed plugins auto-appear under a separate "MCP Tool Plugins" header below the built-ins, grouped by server in `<details>` blocks; each tool gets the same 3-phase checkboxes; defaults to all phases enabled at read time (no DB pollution)
+- **Wrench-icon tooltip in agent chat** ([webapp/src/app/graph/components/AIAssistantDrawer/PhaseIndicatorBar.tsx](webapp/src/app/graph/components/AIAssistantDrawer/PhaseIndicatorBar.tsx)) — now lists installed plugin tools in a separate "MCP Tool Plugins" subsection. Interactive tooltip (300px scroll cap) — mouse can move onto the tooltip body to scroll without the popup closing. Reusable `interactive` prop added to the shared [Tooltip](webapp/src/components/ui/Tooltip/Tooltip.tsx) component (default `false` so all other tooltips keep legacy hover-and-leave behavior)
+
+#### Webapp backend (API + storage)
+
+- **New routes**: `/api/users/[id]/mcp` (GET / POST), `/api/users/[id]/mcp/[serverId]` (PUT / DELETE), `/api/mcp/test` (proxy with masked-token restoration), `/api/mcp/manifest` (proxy), `/api/mcp/reload` (proxy)
+- **Shared zod schema** ([webapp/src/lib/mcp/schema.ts](webapp/src/lib/mcp/schema.ts)) — single source of truth for client-side form validation + server-side API validation. Mirrors the agent's pydantic schema (parity sentinels in tests guard against drift)
+- **`UserSettings.mcpServers Json` column** ([webapp/prisma/schema.prisma](webapp/prisma/schema.prisma)) — JSON-flexible, no future migrations needed for shape evolution
+- **Token masking + preserve-on-update** — same pattern already used for Tavily/Shodan/SerpAPI keys: tokens are masked on read, restored from DB when the user submits the masked placeholder back
+- **Fire-and-forget reload** — every save/delete pings agent's `/mcp/reload` automatically so the running agent picks up changes without restart
+
+#### Agent
+
+- **New module [agentic/mcp_registry.py](agentic/mcp_registry.py)** (~280 LOC): pydantic schema for `MCPServer`, `ToolSpec`, `BearerAuth`; transport-discriminated validators; cross-server uniqueness checks; `redact_for_api()` masks literal tokens before serving the manifest. Headers and stdio env values are passed through verbatim (no substitution)
+- **Refactored [agentic/tools.py](agentic/tools.py)**: `MCPToolsManager(server_configs: dict)` accepts a pre-built dict instead of hardcoded URL kwargs; `SYSTEM_MCP_SERVERS` factory expresses the 5 baseline kali-sandbox servers as `MCPServer` objects; `register_mcp_tools(declared_tool_names)` filters undeclared tools while letting all `SYSTEM_MCP_TOOL_NAMES` pass through (so user MCPs can't accidentally hide built-ins)
+- **`TOOL_REGISTRY` mutation under copy-on-write `RLock`** ([agentic/prompts/tool_registry.py](agentic/prompts/tool_registry.py)) — `apply_mcp_manifests_to_registry(servers)` and `remove_mcp_manifest_entries()` swap atomically; deterministic insertion order keeps the Anthropic prompt-prefix cache stable when the manifest hasn't changed
+- **Read-time phase fallback** in [agentic/project_settings.py](agentic/project_settings.py) — `is_tool_allowed_in_phase` falls back to manifest defaults when a tool isn't in `TOOL_PHASE_MAP`; `get_allowed_tools_for_phase` unions both. No DB pollution from default-phase write-back
+- **All four LLM-injected fields render in every phase the tool is enabled** ([agentic/prompts/__init__.py](agentic/prompts/__init__.py)) — fixed an inconsistency where `description` was previously only rendered in the informational phase. Phase toggle = enable/disable per phase, not field selection. Skill workflows (CVE_EXPLOIT_PROMPT, POST_EXPLOITATION_TOOLS_*, UNCLASSIFIED_EXPLOIT_TOOLS) now append additively on top of the descriptions instead of replacing them
+- **`reload_mcp_manifests()` on the orchestrator** ([agentic/orchestrator.py](agentic/orchestrator.py)) — re-merges system + user servers, re-applies manifest to TOOL_REGISTRY, re-builds `MultiServerMCPClient`. Hash-gated trigger inside `_apply_project_settings()` so no-op re-fetches don't thrash the prompt cache
+- **Three new HTTP endpoints** ([agentic/api.py](agentic/api.py)): `GET /mcp/manifest` (current registry view, redacted), `POST /mcp/reload` (idempotent re-merge), `POST /mcp/test` (throwaway client per request, 30s wall-clock, never mutates running agent state). Uses MCP `ClientSession.list_tools()` directly so the raw protocol-level `inputSchema` flows through to the UI verbatim. `BaseExceptionGroup` unwrapping surfaces real causes (401, DNS, SSL) instead of the opaque `unhandled errors in a TaskGroup`
+- **`uv` installed in [agentic/Dockerfile](agentic/Dockerfile)** — for stdio Python MCPs (`uvx mcp-server-time`, `uvx mitmproxy-mcp`, `uvx semgrep-mcp`, etc.). Node was already present for `npx -y @some/mcp-package` flows
+
+
+---
+
+
 ## [4.8.1] - 2026-05-09
 
 ### Fixed

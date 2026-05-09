@@ -1,12 +1,36 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { ChevronDown, Grid3X3, AlertTriangle, Eye, EyeOff, Loader2 } from 'lucide-react'
+import { ChevronDown, Grid3X3, AlertTriangle, Eye, EyeOff, Loader2, Server } from 'lucide-react'
 import type { Project } from '@prisma/client'
 import { useProject } from '@/providers/ProjectProvider'
 import { Modal } from '@/components/ui/Modal/Modal'
 import { WikiInfoButton } from '@/components/ui/WikiInfoButton'
 import styles from '../ProjectForm.module.css'
+
+const ALL_PHASES = ['informational', 'exploitation', 'post_exploitation'] as const
+
+interface ManifestToolSpec {
+  name: string
+  default_phases?: string[] | null
+}
+
+interface ManifestServer {
+  id: string
+  name: string
+  description: string
+  enabled: boolean
+  default_phases: string[]
+  tags?: string[]
+  tools: ManifestToolSpec[]
+}
+
+interface ManifestPayload {
+  servers?: ManifestServer[]
+  errors?: { server_id: string; code: string; message: string }[]
+  warnings?: { server_id: string; code: string; message: string }[]
+  system_server_ids?: string[]
+}
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
 
@@ -65,6 +89,25 @@ export function ToolMatrixSection({ data, updateField }: ToolMatrixSectionProps)
   const [isOpen, setIsOpen] = useState(true)
   const { userId } = useProject()
   const [missingKeys, setMissingKeys] = useState<Set<string>>(new Set())
+  const [userMcpServers, setUserMcpServers] = useState<ManifestServer[]>([])
+
+  // Source the user MCP list from the DATABASE (the user's saved
+  // configuration), not from the agent's runtime manifest. The DB is the
+  // source of truth — the agent's registry is downstream and may lag
+  // until a chat session triggers a settings reload (e.g., right after
+  // an agent restart). Reading from the DB means the matrix always
+  // reflects what the user has saved, regardless of agent state.
+  useEffect(() => {
+    if (!userId) return
+    fetch(`/api/users/${userId}/mcp`)
+      .then(r => r.ok ? r.json() : null)
+      .then((d: { servers?: ManifestServer[] } | null) => {
+        if (d?.servers && Array.isArray(d.servers)) {
+          setUserMcpServers(d.servers)
+        }
+      })
+      .catch(() => {/* graceful: matrix still works with built-ins */})
+  }, [userId])
 
   // API key modal state
   const [keyModal, setKeyModal] = useState<string | null>(null) // tool id or null
@@ -245,6 +288,89 @@ export function ToolMatrixSection({ data, updateField }: ToolMatrixSectionProps)
               )
             })}
           </div>
+
+          <div style={{ marginTop: 'var(--space-4)' }}>
+            <h3 style={{
+              fontSize: 'var(--text-md)',
+              fontWeight: 600,
+              margin: '0 0 var(--space-2) 0',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 'var(--space-2)',
+              color: 'var(--text-primary)',
+              borderTop: '1px solid var(--border-default)',
+              paddingTop: 'var(--space-3)',
+            }}>
+              <Server size={14} />
+              MCP Tool Plugins
+            </h3>
+            <p className={styles.sectionDescription} style={{ marginTop: 0 }}>
+              User-installed MCP Tool Plugins — add or edit in{' '}
+              <a href="/settings?tab=mcp" style={{ color: 'var(--accent-primary)' }}>
+                Global Settings → MCP Tool Plugins
+              </a>.
+            </p>
+          </div>
+
+          {userMcpServers.length === 0 ? (
+            <p className={styles.sectionDescription} style={{
+              fontStyle: 'italic',
+              color: 'var(--text-tertiary)',
+              padding: 'var(--space-2) 0',
+            }}>
+              No MCP Tool Plugins configured for this user yet.
+            </p>
+          ) : (
+            <div>
+              {userMcpServers.map(srv => (
+                <details key={srv.id} open style={{ marginBottom: 'var(--space-3)' }}>
+                  <summary style={{ cursor: 'pointer', fontWeight: 600, padding: '4px 0' }}>
+                    {srv.name || srv.id}
+                    {srv.description && <span style={{ fontWeight: 400, color: 'var(--text-tertiary)', marginLeft: 8, fontSize: '12px' }}>— {srv.description}</span>}
+                    {!srv.enabled && <span style={{ color: 'var(--text-tertiary)', marginLeft: 8, fontSize: '12px' }}>(disabled)</span>}
+                  </summary>
+                  <div className={styles.toolPhaseGrid}>
+                    {srv.tools.map(tool => {
+                      const phaseMap = (typeof data.agentToolPhaseMap === 'string'
+                        ? JSON.parse(data.agentToolPhaseMap)
+                        : data.agentToolPhaseMap ?? {}) as Record<string, string[]>
+                      const defaultPhases = (tool.default_phases && tool.default_phases.length > 0)
+                        ? tool.default_phases
+                        : (srv.default_phases && srv.default_phases.length > 0
+                          ? srv.default_phases
+                          : [...ALL_PHASES])
+                      const effectivePhases = phaseMap[tool.name] !== undefined
+                        ? phaseMap[tool.name]
+                        : defaultPhases
+                      const togglePhase = (phase: string) => {
+                        const newMap = { ...phaseMap }
+                        const current = newMap[tool.name] !== undefined ? newMap[tool.name] : effectivePhases
+                        newMap[tool.name] = current.includes(phase)
+                          ? current.filter((p: string) => p !== phase)
+                          : [...current, phase]
+                        updateField('agentToolPhaseMap', newMap as typeof data.agentToolPhaseMap)
+                      }
+                      return (
+                        <div key={tool.name} className={styles.toolPhaseRow}>
+                          <span className={styles.toolPhaseName}>{tool.name}</span>
+                          {ALL_PHASES.map(phase => (
+                            <label key={phase} className={styles.phaseCheck}>
+                              <input
+                                type="checkbox"
+                                checked={effectivePhases.includes(phase)}
+                                disabled={!srv.enabled}
+                                onChange={() => togglePhase(phase)}
+                              />
+                            </label>
+                          ))}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </details>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

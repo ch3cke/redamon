@@ -409,6 +409,35 @@ class AgentOrchestrator:
                 from prompts.tool_registry import pop_tradecraft_entry
                 pop_tradecraft_entry()
 
+        # User-managed MCP servers: trigger an async reload when the user's
+        # mcpServers list has changed since the last apply. Hash-based check
+        # keeps the prompt-prefix cache stable when nothing's changed (a fresh
+        # fetch returning identical data is a no-op).
+        try:
+            import hashlib
+            import json as _json
+            user_mcp_raw = get_setting('USER_MCP_SERVERS', []) or []
+            digest = hashlib.sha256(
+                _json.dumps(user_mcp_raw, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()
+            last_digest = getattr(self, '_last_user_mcp_hash', None)
+            if digest != last_digest:
+                self._last_user_mcp_hash = digest
+                try:
+                    import asyncio
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.reload_mcp_manifests(user_mcp_raw))
+                    logger.info(
+                        f"User MCP manifest changed (hash {digest[:12]}); "
+                        f"reload scheduled."
+                    )
+                except RuntimeError:
+                    # No running loop — apply must be running outside async ctx.
+                    # Skip; reload will fire on the next async-context apply.
+                    logger.debug("User MCP manifest changed but no running loop; deferred.")
+        except Exception as e:
+            logger.warning(f"User MCP manifest reload check failed: {e}")
+
     def _build_section_picker_llm(self):
         """Instantiate a Haiku LLM for the tradecraft section picker.
 
@@ -490,8 +519,20 @@ class AgentOrchestrator:
 
     async def _setup_tools(self) -> None:
         """Set up all tools (MCP and Neo4j)."""
-        # Setup MCP tools
-        mcp_manager = MCPToolsManager()
+        # Build MCP server config: 5 system servers + (later, after project
+        # settings load) any user-managed servers from UserSettings.mcpServers.
+        # User servers are merged in via reload_mcp_manifests() once the
+        # project's settings are available; at startup we only have the
+        # system set so the agent can come up cleanly.
+        from tools import _build_system_mcp_servers
+        import mcp_registry
+        system_servers = _build_system_mcp_servers()
+        mcp_registry.set_current(system_servers)
+        server_configs, env_warnings = mcp_registry.to_mcp_servers_dict(system_servers)
+        if env_warnings:
+            mcp_registry.set_current(system_servers, warnings=env_warnings)
+
+        mcp_manager = MCPToolsManager(server_configs=server_configs)
         mcp_tools = await mcp_manager.get_tools()
 
         # Setup Neo4j graph query tool (LLM is None until project settings are loaded)
@@ -551,9 +592,77 @@ class AgentOrchestrator:
             shodan_tool, google_dork_tool,
             tradecraft_tool,
         )
+        # No declared_tool_names filter at startup — only system MCP tools
+        # are loaded. User MCPs (with their declared filter) come through
+        # reload_mcp_manifests() once project settings are available.
         self.tool_executor.register_mcp_tools(mcp_tools)
 
         logger.info(f"Tools initialized: {len(self.tool_executor.get_all_tools())} available")
+
+    async def reload_mcp_manifests(self, user_servers_raw=None) -> dict:
+        """Re-merge system + user MCP servers, refresh registry, reconnect MCP client.
+
+        Called from:
+        - Webapp's POST /mcp/reload after a user adds/edits/deletes an MCP server.
+        - Implicitly during project session startup once user settings are
+          fetched (so per-user MCPs activate without a manual reload click).
+
+        Args:
+            user_servers_raw: list of dicts from UserSettings.mcpServers. When
+                None, reads from the most recent project_settings cache via
+                get_setting('USER_MCP_SERVERS', []).
+
+        Returns:
+            dict with the new manifest snapshot (servers, errors, warnings,
+            declared_tool_names) — same shape as GET /mcp/manifest body.
+        """
+        from tools import _build_system_mcp_servers
+        from prompts.tool_registry import apply_mcp_manifests_to_registry
+        from project_settings import get_setting
+        import mcp_registry
+
+        if user_servers_raw is None:
+            user_servers_raw = get_setting('USER_MCP_SERVERS', []) or []
+
+        user_servers, parse_errors = mcp_registry.parse_user_servers(user_servers_raw)
+        system_servers = _build_system_mcp_servers()
+        all_servers = system_servers + user_servers
+
+        server_configs, env_warnings = mcp_registry.to_mcp_servers_dict(all_servers)
+        mcp_registry.set_current(all_servers, errors=parse_errors, warnings=env_warnings)
+
+        declared_user_tools = apply_mcp_manifests_to_registry(user_servers)
+
+        # Swap the manager's config and force a reconnect to bind a fresh
+        # MultiServerMCPClient that includes any new user-MCP URLs.
+        if hasattr(self, '_mcp_manager') and self._mcp_manager is not None:
+            self._mcp_manager.replace_server_configs(server_configs)
+            seen_gen = self._mcp_manager.generation
+            new_gen, new_tools = await self._mcp_manager.reconnect(
+                seen_gen, reason="mcp_manifest_reload",
+            )
+            if new_tools:
+                self.tool_executor.register_mcp_tools(
+                    new_tools,
+                    declared_tool_names=declared_user_tools,
+                )
+                logger.info(
+                    f"MCP manifest reload: {len(user_servers)} user server(s), "
+                    f"{len(declared_user_tools)} declared tool(s), "
+                    f"{len(new_tools)} live tool(s) registered."
+                )
+            else:
+                logger.warning(
+                    "MCP manifest reload: reconnect returned no tools; "
+                    "system tools may be temporarily unavailable."
+                )
+
+        return {
+            "servers": mcp_registry.redact_for_api(all_servers),
+            "errors": [e.model_dump() for e in parse_errors],
+            "warnings": [w.model_dump() for w in env_warnings],
+            "declared_user_tool_names": sorted(declared_user_tools),
+        }
 
     def _setup_knowledge_base(self):
         """

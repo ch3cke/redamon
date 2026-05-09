@@ -5,6 +5,19 @@ Single source of truth for tool metadata used by dynamic prompt builders.
 Dict insertion order defines tool priority (first = highest).
 """
 
+import threading
+
+# Tracks which TOOL_REGISTRY keys were injected by the most recent MCP manifest
+# load, so a subsequent load can remove them cleanly before applying the new set.
+_mcp_injected_keys: set = set()
+
+# Serialises mutations (apply / remove) so concurrent fireteam reads never
+# observe a half-mutated dict. Reads themselves don't take the lock — they
+# tolerate either pre- or post-mutation state (insertion order is preserved
+# across mutations and dict access is GIL-protected at the Python level).
+_registry_lock = threading.RLock()
+
+
 TOOL_REGISTRY = {
     "query_graph": {
         "purpose": "Neo4j database queries",
@@ -500,6 +513,62 @@ def swap_tradecraft_entry(rich_entry: dict) -> None:
 
 def pop_tradecraft_entry() -> None:
     TOOL_REGISTRY.pop("tradecraft_lookup", None)
+
+
+# =========================================================================
+# MCP manifest entries (user-managed servers via Settings UI)
+# =========================================================================
+#
+# `apply_mcp_manifests_to_registry` injects each declared MCP tool into
+# TOOL_REGISTRY so the prompt builders pick them up automatically. System
+# MCP servers (network_recon, nmap, nuclei, metasploit, playwright) keep
+# their existing hand-curated entries above and are NOT touched by these
+# helpers. Only user-supplied servers and their tools flow through here.
+
+def apply_mcp_manifests_to_registry(servers) -> set:
+    """
+    Replace the previously-injected MCP tool entries with the ones declared
+    by ``servers`` (a list of mcp_registry.MCPServer instances). Returns the
+    set of tool names that are now declared.
+
+    Insertion order: existing TOOL_REGISTRY entries first (built-ins +
+    system MCP wrappers), then manifest tools sorted by (server_id, tool_name)
+    so a stable manifest produces a stable prompt prefix (cache-friendly).
+    """
+    global _mcp_injected_keys
+    declared: set = set()
+
+    with _registry_lock:
+        # Drop previously-injected keys
+        for k in list(_mcp_injected_keys):
+            TOOL_REGISTRY.pop(k, None)
+        _mcp_injected_keys = set()
+
+        # Insert in deterministic order (server id, then tool name)
+        ordered = sorted(servers, key=lambda s: s.id)
+        for srv in ordered:
+            if not srv.enabled:
+                continue
+            for tool in sorted(srv.tools, key=lambda t: t.name):
+                TOOL_REGISTRY[tool.name] = {
+                    "purpose": tool.purpose,
+                    "when_to_use": tool.when_to_use,
+                    "args_format": tool.args_format,
+                    "description": tool.description,
+                }
+                _mcp_injected_keys.add(tool.name)
+                declared.add(tool.name)
+
+    return declared
+
+
+def remove_mcp_manifest_entries() -> None:
+    """Drop all MCP-injected entries (used on full reload before re-apply)."""
+    global _mcp_injected_keys
+    with _registry_lock:
+        for k in list(_mcp_injected_keys):
+            TOOL_REGISTRY.pop(k, None)
+        _mcp_injected_keys = set()
 
 
 # Simplified web_search entry used when Knowledge Base is not available

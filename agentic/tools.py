@@ -67,25 +67,101 @@ def get_phase_context() -> str:
 
 
 # =============================================================================
+# SYSTEM MCP SERVERS (baseline — shipped with the product, not user-managed)
+# =============================================================================
+
+# These five servers run inside kali-sandbox and provide the core pentest tools.
+# Their tool wrappers are registered in prompts/tool_registry.py as built-ins
+# (execute_nmap, execute_nuclei, kali_shell, etc.). The MCPServer entries below
+# carry only transport config; tools=[] because TOOL_REGISTRY already owns the
+# rendering metadata for them.
+def _build_system_mcp_servers():
+    """Lazy import — mcp_registry imports tool_registry which imports tools."""
+    from mcp_registry import MCPServer
+    return [
+        MCPServer(
+            id="network_recon",
+            name="Network Recon (kali-sandbox)",
+            description="curl, naabu, hydra, command exec",
+            transport="sse",
+            url=os.environ.get("MCP_NETWORK_RECON_URL", "http://host.docker.internal:8000/sse"),
+            connect_timeout=60,
+            read_timeout=1800,
+            tools=[],
+        ),
+        MCPServer(
+            id="nmap",
+            name="Nmap (kali-sandbox)",
+            description="Network mapper",
+            transport="sse",
+            url=os.environ.get("MCP_NMAP_URL", "http://host.docker.internal:8004/sse"),
+            connect_timeout=60,
+            read_timeout=600,
+            tools=[],
+        ),
+        MCPServer(
+            id="metasploit",
+            name="Metasploit (kali-sandbox)",
+            description="Exploitation framework",
+            transport="sse",
+            url=os.environ.get("MCP_METASPLOIT_URL", "http://host.docker.internal:8003/sse"),
+            connect_timeout=60,
+            read_timeout=1800,
+            tools=[],
+        ),
+        MCPServer(
+            id="nuclei",
+            name="Nuclei (kali-sandbox)",
+            description="Template-based vulnerability scanner",
+            transport="sse",
+            url=os.environ.get("MCP_NUCLEI_URL", "http://host.docker.internal:8002/sse"),
+            connect_timeout=60,
+            read_timeout=600,
+            tools=[],
+        ),
+        MCPServer(
+            id="playwright",
+            name="Playwright (kali-sandbox)",
+            description="Browser automation",
+            transport="sse",
+            url=os.environ.get("MCP_PLAYWRIGHT_URL", "http://host.docker.internal:8005/sse"),
+            connect_timeout=60,
+            read_timeout=120,
+            tools=[],
+        ),
+    ]
+
+
+# Tool names backed by the system MCP servers. These pass through any
+# declared-tool-name filter applied to register_mcp_tools(). Includes every
+# tool name the kali-sandbox MCP servers expose (whether or not it has a
+# TOOL_REGISTRY entry — phantom tools are simply unused by the LLM but
+# their registration shouldn't be filtered as if they were a stray user
+# manifest entry).
+SYSTEM_MCP_TOOL_NAMES = frozenset({
+    "execute_curl", "execute_naabu", "execute_httpx", "execute_subfinder",
+    "execute_amass", "execute_arjun", "execute_ffuf", "execute_gau",
+    "execute_jsluice", "execute_katana", "execute_wpscan",
+    "execute_nmap", "execute_nuclei", "kali_shell", "execute_playwright",
+    "execute_hydra", "metasploit_console", "msf_restart",
+    "execute_code", "cve_intel", "execute_masscan",
+})
+
+
+# =============================================================================
 # MCP TOOLS MANAGER
 # =============================================================================
 
 class MCPToolsManager:
-    """Manages MCP (Model Context Protocol) tool connections."""
+    """Manages MCP (Model Context Protocol) tool connections.
 
-    def __init__(
-        self,
-        network_recon_url: str = None,
-        nmap_url: str = None,
-        metasploit_url: str = None,
-        nuclei_url: str = None,
-        playwright_url: str = None,
-    ):
-        self.network_recon_url = network_recon_url or os.environ.get('MCP_NETWORK_RECON_URL', 'http://host.docker.internal:8000/sse')
-        self.nmap_url = nmap_url or os.environ.get('MCP_NMAP_URL', 'http://host.docker.internal:8004/sse')
-        self.metasploit_url = metasploit_url or os.environ.get('MCP_METASPLOIT_URL', 'http://host.docker.internal:8003/sse')
-        self.nuclei_url = nuclei_url or os.environ.get('MCP_NUCLEI_URL', 'http://host.docker.internal:8002/sse')
-        self.playwright_url = playwright_url or os.environ.get('MCP_PLAYWRIGHT_URL', 'http://host.docker.internal:8005/sse')
+    Constructor takes a pre-built ``server_configs`` dict in the shape consumed
+    by ``MultiServerMCPClient`` (one entry per server, keyed by id). Build it
+    via ``mcp_registry.to_mcp_servers_dict([*system, *user])``.
+    """
+
+    def __init__(self, server_configs: Optional[Dict[str, Dict[str, any]]] = None):
+        self._server_configs: Dict[str, Dict[str, any]] = dict(server_configs or {})
         self.client: Optional[MultiServerMCPClient] = None
         self._tools_cache: Dict[str, any] = {}
         # Monotonic counter of how many times the MCP client has been (re)built.
@@ -95,6 +171,11 @@ class MCPToolsManager:
         self._generation: int = 0
         # Serialises reconnects across concurrent fireteam tool calls.
         self._reconnect_lock: asyncio.Lock = asyncio.Lock()
+
+    def replace_server_configs(self, server_configs: Dict[str, Dict[str, any]]) -> None:
+        """Swap the server config dict. Caller is expected to call get_tools()
+        next to bind a fresh MultiServerMCPClient with the new configs."""
+        self._server_configs = dict(server_configs or {})
 
     async def get_tools(self, max_retries: int = 5, retry_delay: float = 10.0) -> List:
         """
@@ -108,35 +189,17 @@ class MCPToolsManager:
         """
         logger.info("Connecting to MCP servers...")
 
-        mcp_servers = {}
-
-        # Timeout settings (in seconds):
-        # - timeout: HTTP connection timeout (default 5s)
-        # - sse_read_timeout: How long to wait for SSE events (default 300s = 5 min)
-        # Metasploit needs longer timeouts for brute force attacks (30 min for large wordlists)
-        server_configs = [
-            ("network_recon", self.network_recon_url, 60, 1800),  # curl+naabu+hydra+command, 30 min read (hydra needs up to 30 min)
-            ("nmap", self.nmap_url, 60, 600),                     # 10 min read
-            ("metasploit", self.metasploit_url, 60, 1800),        # 30 min read
-            ("nuclei", self.nuclei_url, 60, 600),                 # 10 min read
-            ("playwright", self.playwright_url, 60, 120),            # 2 min read
-        ]
-
-        for server_name, url, timeout, sse_read_timeout in server_configs:
-            try:
-                logger.info(f"Connecting to MCP {server_name} server at {url}")
-                mcp_servers[server_name] = {
-                    "url": url,
-                    "transport": "sse",
-                    "timeout": timeout,
-                    "sse_read_timeout": sse_read_timeout,
-                }
-            except Exception as e:
-                logger.warning(f"Failed to configure MCP server {server_name}: {e}")
+        mcp_servers = dict(self._server_configs)
 
         if not mcp_servers:
             logger.warning("No MCP servers configured")
             return []
+
+        # Log per-server transport target for debug visibility
+        for sid, cfg in mcp_servers.items():
+            transport = cfg.get("transport", "?")
+            target = cfg.get("url") or cfg.get("command") or "?"
+            logger.info(f"Connecting to MCP {sid} ({transport}) -> {target}")
 
         # Retry connection with backoff — MCP servers may still be starting
         for attempt in range(1, max_retries + 1):
@@ -1547,22 +1610,58 @@ class PhaseAwareToolExecutor:
         if tradecraft_tool:
             self._all_tools["tradecraft_lookup"] = tradecraft_tool
 
-    def register_mcp_tools(self, tools: List) -> None:
+    def register_mcp_tools(
+        self,
+        tools: List,
+        declared_tool_names: Optional[set] = None,
+    ) -> None:
         """
         Register MCP tools after they're (re)loaded.
 
         Called once at startup and again after every successful mcp_manager
         reconnect. Drops previously-registered MCP tool references first so
         stale objects bound to a dead client don't linger in _all_tools.
+
+        Args:
+            tools: list of MCP tool objects from MultiServerMCPClient.get_tools().
+            declared_tool_names: when provided, only tools whose name is in this
+                set are registered. Used to hide undeclared user-MCP-server tools
+                from the agent. System MCP tools (SYSTEM_MCP_TOOL_NAMES) always
+                pass through regardless of this set. When ``None``, no filter is
+                applied (legacy behavior — used by reconnect path which already
+                trusts the manager's tool set).
         """
         for name in self._mcp_tool_names:
             self._all_tools.pop(name, None)
         self._mcp_tool_names.clear()
+
+        skipped: List[str] = []
         for tool in tools:
             tool_name = getattr(tool, 'name', None)
-            if tool_name:
-                self._all_tools[tool_name] = tool
-                self._mcp_tool_names.add(tool_name)
+            if not tool_name:
+                continue
+            if declared_tool_names is not None:
+                if tool_name not in declared_tool_names and tool_name not in SYSTEM_MCP_TOOL_NAMES:
+                    skipped.append(tool_name)
+                    continue
+            self._all_tools[tool_name] = tool
+            self._mcp_tool_names.add(tool_name)
+
+        if skipped:
+            logger.warning(
+                f"Skipped registering {len(skipped)} MCP tool(s) not declared in any "
+                f"manifest: {sorted(skipped)}"
+            )
+
+        if declared_tool_names is not None:
+            missing = sorted(
+                n for n in declared_tool_names
+                if n not in self._mcp_tool_names and n not in SYSTEM_MCP_TOOL_NAMES
+            )
+            if missing:
+                logger.warning(
+                    f"Manifest declared tools that the live MCP servers did not expose: {missing}"
+                )
 
     def update_web_search_tool(self, tool: callable) -> None:
         """Replace the web search tool (e.g. when Tavily key changes)."""

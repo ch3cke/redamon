@@ -21,7 +21,7 @@
 
 <p align="center">
   <a href="https://github.com/samugit83/redamon/stargazers"><img height="24" src="https://img.shields.io/github/stars/samugit83/redamon?style=flat&color=2E8B57&label=Stars" alt="GitHub Stars"/></a>
-  <img height="24" src="https://img.shields.io/badge/v4.8.1-release-2E8B57?style=flat" alt="Version 4.8.1"/>
+  <img height="24" src="https://img.shields.io/badge/v4.9.0-release-2E8B57?style=flat" alt="Version 4.9.0"/>
   <img height="24" src="https://img.shields.io/badge/WARNING-SECURITY%20TOOL-B22222?style=flat" alt="Security Tool Warning"/>
   <img height="24" src="https://img.shields.io/badge/LICENSE-MIT-4169A1?style=flat" alt="MIT License"/>
   <img height="24" src="https://img.shields.io/badge/END--TO--END-PIPELINE-A01025?style=flat" alt="End-to-End Pipeline"/>
@@ -522,6 +522,14 @@ A **LangGraph-based autonomous agent** implementing the ReAct pattern. It progre
 | | **execute_code** | Write and run code files (Python, bash, Ruby, Perl, C, C++) -- no shell escaping | Exploit, Post | network_recon :8000 |
 
 <sub>All MCP tools run inside a Kali Linux sandbox container. Tools marked as dangerous require manual confirmation before execution. Stealth mode restricts active tools to passive-only or single-target operations. **Note:** WPScan is licensed under the [WPScan Public Source License](https://github.com/wpscanteam/wpscan/blob/master/LICENSE) (not MIT). Free for pentesting assessments and personal use; commercial use may require a separate license from [wpscan.com](https://wpscan.com).</sub>
+
+#### MCP Tool Plugins (extending the agent's tool arsenal)
+
+Beyond the 5 built-in MCP servers above, you can plug **any Model-Context-Protocol server** into the agent as a *tool plugin* — Shodan, GitHub, Censys, Hugging Face, mitmproxy, your own internal MCPs — without editing code, rebuilding containers, or running migrations. Open **Global Settings → MCP Tool Plugins**.
+
+Two paths: pick one of **39 prefilled Quick-Add presets** (OSINT, threat-intel, cloud, web-app scanners, reporting, reverse engineering — categories tagged on every card), or click **Add MCP** for a manual config. Three transports supported: `stdio`, `sse`, `streamable_http`. The orange **Discover and add new tools** button runs a live `list_tools()` against the draft, returns within 30 seconds, and auto-imports each discovered tool with its name, description, and a JSON-Schema-derived `args_format` (types, enums, defaults, min/max, per-property descriptions). Save → tools auto-appear in every project's Tool Matrix and in the agent's system prompt within ~1 second. No agent restart, no `prisma db push`.
+
+> **Full operator manual** — every form field, all 39 presets, the auth flow, the live discovery workflow, validation rules, troubleshooting, and the storage / security model: **[MCP Tool Plugins wiki page](https://github.com/samugit83/redamon/wiki/MCP-Tool-Plugins)**.
 
 ### Fireteam — Parallel Specialist Sub-Agents
 

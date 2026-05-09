@@ -1237,6 +1237,177 @@ async def tradecraft_verify(body: TradecraftVerifyRequest):
         )
 
 
+@app.get("/mcp/manifest", tags=["MCP"])
+async def get_mcp_manifest():
+    """
+    Return the current MCP server manifest as seen by the agent.
+
+    Combines the 5 system MCP servers (shipped with the product) and any
+    user-managed servers loaded from the most recent project session. Auth
+    tokens are NOT exposed — only env-var references.
+    """
+    import mcp_registry
+    return {
+        "servers": mcp_registry.redact_for_api(mcp_registry.current()),
+        "errors": [e.model_dump() for e in mcp_registry.current_errors()],
+        "warnings": [w.model_dump() for w in mcp_registry.current_warnings()],
+        "system_server_ids": sorted(mcp_registry.SYSTEM_SERVER_IDS),
+    }
+
+
+@app.post("/mcp/reload", tags=["MCP"])
+async def reload_mcp_manifest(payload: dict = None):
+    """
+    Re-merge system + user MCP servers and reconnect the MCP client.
+
+    Called by the webapp after a user adds/edits/deletes an MCP server.
+    Body (optional): {"userMcpServers": [...]} — when omitted, uses the
+    most recent cached project settings.
+    """
+    if orchestrator is None:
+        return JSONResponse({"error": "orchestrator not ready"}, status_code=503)
+
+    user_servers_raw = None
+    if isinstance(payload, dict):
+        user_servers_raw = payload.get("userMcpServers")
+
+    try:
+        result = await orchestrator.reload_mcp_manifests(user_servers_raw)
+        return result
+    except Exception as exc:
+        logger.exception(f"/mcp/reload failed: {exc}")
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.post("/mcp/test", tags=["MCP"])
+async def test_mcp_server(server: dict):
+    """
+    Test connectivity to a single MCP server draft (NOT yet persisted).
+
+    Builds a throwaway MultiServerMCPClient, calls list_tools(), tears it down.
+    Does not mutate any agent state — safe to call while scans are in flight.
+    """
+    import mcp_registry
+    import time
+    from langchain_mcp_adapters.client import MultiServerMCPClient
+
+    started = time.monotonic()
+    parse_errors: list = []
+    try:
+        srv_obj = mcp_registry.MCPServer.model_validate(server)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "discovered_tools": [],
+            "error": f"schema validation failed: {exc}",
+            "warnings": [],
+        }
+
+    config_dict, env_warnings = mcp_registry.to_mcp_servers_dict([srv_obj])
+    if not config_dict:
+        return {
+            "ok": False,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "discovered_tools": [],
+            "error": "server is disabled — enable it before testing",
+            "warnings": [w.model_dump() for w in env_warnings],
+        }
+
+    client = None
+    try:
+        client = MultiServerMCPClient(config_dict)
+
+        # Open an MCP session and call list_tools at the protocol level.
+        # This returns mcp.types.Tool objects with their raw inputSchema
+        # JSON dict, exactly as the server published it — works with any
+        # MCP-spec-compliant server regardless of how langchain happens
+        # to wrap things.
+        async def _fetch_raw_tools():
+            async with client.session(srv_obj.id) as session:
+                resp = await session.list_tools()
+                return resp.tools
+
+        raw_tools = await asyncio.wait_for(_fetch_raw_tools(), timeout=30.0)
+
+        discovered = []
+        declared_names = {t.name for t in srv_obj.tools}
+        seen_names = set()
+        for mcp_tool in raw_tools:
+            name = getattr(mcp_tool, "name", None)
+            if not name:
+                continue
+            seen_names.add(name)
+            # inputSchema is a pydantic-modeled dict per the MCP spec.
+            # model_dump() flattens it back to the canonical JSON Schema dict.
+            schema = getattr(mcp_tool, "inputSchema", None)
+            if hasattr(schema, "model_dump"):
+                schema = schema.model_dump(exclude_none=True)
+            elif not isinstance(schema, dict):
+                schema = None
+            discovered.append({
+                "name": name,
+                "description": getattr(mcp_tool, "description", "") or "",
+                "input_schema": schema,
+            })
+
+        warnings = [w.model_dump() for w in env_warnings]
+        for declared_name in declared_names - seen_names:
+            warnings.append({
+                "server_id": srv_obj.id, "code": "declared_not_live",
+                "message": f"Tool '{declared_name}' declared in form but not returned by server.",
+            })
+
+        return {
+            "ok": True,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "discovered_tools": discovered,
+            "error": None,
+            "warnings": warnings,
+        }
+    except asyncio.TimeoutError:
+        return {
+            "ok": False,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "discovered_tools": [],
+            "error": "connection timed out after 30s",
+            "warnings": [w.model_dump() for w in env_warnings],
+        }
+    except BaseExceptionGroup as group:  # noqa: F821 — Python 3.11+
+        # langchain_mcp_adapters wraps anyio TaskGroup failures in an
+        # ExceptionGroup whose default str() is "unhandled errors in a
+        # TaskGroup (1 sub-exception)" — useless. Recursively flatten
+        # the leaves so the user sees the real cause (401, DNS error, etc).
+        leaves: list[BaseException] = []
+        def _flatten(g):
+            for sub in g.exceptions:
+                if isinstance(sub, BaseExceptionGroup):
+                    _flatten(sub)
+                else:
+                    leaves.append(sub)
+        _flatten(group)
+        msg = "; ".join(f"{type(e).__name__}: {e}" for e in leaves) or str(group)
+        logger.warning(f"/mcp/test ExceptionGroup unwrapped: {msg}")
+        return {
+            "ok": False,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "discovered_tools": [],
+            "error": msg,
+            "warnings": [w.model_dump() for w in env_warnings],
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "discovered_tools": [],
+            "error": f"{type(exc).__name__}: {exc}",
+            "warnings": [w.model_dump() for w in env_warnings],
+        }
+    finally:
+        # Drop the throwaway client; rely on GC + peer SSE half-close.
+        client = None
+
+
 @app.get("/defaults", tags=["System"])
 async def get_defaults():
     """

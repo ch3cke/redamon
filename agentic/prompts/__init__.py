@@ -196,10 +196,11 @@ def get_phase_tools(
     if "kali_shell" in allowed_tools:
         parts.append(build_kali_install_prompt())
 
-    # Dynamic tool availability table — skip in informational phase where
-    # build_informational_tool_descriptions() already provides full details
-    if phase != "informational":
-        parts.append(build_tool_availability_table(phase, allowed_tools))
+    # Dynamic tool availability table — render in EVERY phase so the LLM
+    # always sees the same purpose + when_to_use columns for any allowed
+    # tool. Phase toggles control whether a tool appears at all (via
+    # allowed_tools), not which fields render.
+    parts.append(build_tool_availability_table(phase, allowed_tools))
 
     # Add mode decision matrix for exploitation only (not needed in post-expl, mode already determined)
     if phase == "exploitation" and attack_path_type == "cve_exploit":
@@ -436,13 +437,17 @@ def get_phase_tools(
             return True
         return False
 
-    # Add phase and ATTACK PATH specific workflow guidance
-    if phase == "informational":
-        # Dynamic tool descriptions (only shows allowed tools)
-        parts.append(build_informational_tool_descriptions(allowed_tools))
+    # Tool descriptions: render in EVERY phase for every allowed tool.
+    # Phase toggle = enable/disable per phase, NOT field selection. If a
+    # tool is in allowed_tools for the current phase, the LLM sees all
+    # four fields (purpose, when_to_use, args_format, description) — same
+    # contract across the three phases.
+    parts.append(build_informational_tool_descriptions(allowed_tools))
 
-        # Inject skill workflow — built-in skills get their full prompt from the start,
-        # just like user skills. The workflow itself contains recon steps (Step 1: Target Analysis etc.)
+    # Skill workflows are now ADDITIVE on top of the descriptions, not
+    # replacements. The descriptions teach the LLM what each tool does;
+    # the skill workflow tells it the playbook for the current attack.
+    if phase == "informational":
         user_skill_content = _resolve_user_skill()
         if user_skill_content:
             parts.append(
@@ -454,9 +459,10 @@ def get_phase_tools(
             _inject_builtin_skill_workflow()
 
     elif phase == "exploitation":
-        # SELECT WORKFLOW BASED ON ATTACK SKILL TYPE
+        # Built-in skill workflows have curated tool playbooks for known
+        # attack paths (CVE exploit, brute force, etc.). They append to
+        # — not replace — the generic tool descriptions above.
         if not _inject_builtin_skill_workflow():
-            # No built-in skill matched — check user skills and unclassified
             if attack_path_type.startswith("user_skill:"):
                 user_skill_content = _resolve_user_skill()
                 if user_skill_content:
@@ -465,15 +471,12 @@ def get_phase_tools(
                     parts.append(UNCLASSIFIED_EXPLOIT_TOOLS)
             elif attack_path_type.endswith("-unclassified"):
                 parts.append(UNCLASSIFIED_EXPLOIT_TOOLS)
-            else:
-                parts.append(build_informational_tool_descriptions(allowed_tools))
+            # else: descriptions above are sufficient
 
-        # Add note about post-exploitation availability
         if not activate_post_expl:
             parts.append("\n**NOTE:** Post-exploitation phase is DISABLED. Complete exploitation and use action='complete'.\n")
 
     elif phase == "post_exploitation":
-        # User skills define their own post-exploitation workflow
         user_skill_content = _resolve_user_skill()
         if user_skill_content:
             parts.append(
@@ -486,9 +489,7 @@ def get_phase_tools(
                 parts.append(POST_EXPLOITATION_TOOLS_STATEFULL)
             else:
                 parts.append(POST_EXPLOITATION_TOOLS_STATELESS)
-        else:
-            # metasploit_console disabled — show only informational tool descriptions
-            parts.append(build_informational_tool_descriptions(allowed_tools))
+        # else: descriptions above are sufficient
 
     return "\n".join(parts)
 

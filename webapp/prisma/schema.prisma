@@ -100,6 +100,9 @@ model UserSettings {
   chiselServerUrl String   @default("") @map("chisel_server_url")
   chiselAuth      String   @default("") @map("chisel_auth")
 
+  // User-managed MCP servers (UI-driven, see /settings/mcp)
+  mcpServers      Json     @default("[]") @map("mcp_servers")
+
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 
@@ -117,6 +120,67 @@ model ApiKeyRotationConfig {
 
   @@unique([userId, toolName])
   @@map("api_key_rotation_configs")
+}
+
+// =============================================================================
+// LangGraph checkpointer tables — owned by agentic/orchestrator.py via the
+// `AsyncPostgresSaver.setup()` migration runner. Declared here so that
+// `prisma db push --accept-data-loss` (run by the webapp entrypoint) does
+// NOT see them as "extras" and drop them on every webapp restart.
+//
+// Schema mirrors langgraph.checkpoint.postgres.base.MIGRATIONS — keep in
+// sync with that library. Ignored by the Prisma client (the webapp never
+// reads/writes these directly; only the agent does, via psycopg).
+// =============================================================================
+
+model CheckpointMigrations {
+  v Int @id
+
+  @@map("checkpoint_migrations")
+  @@ignore
+}
+
+model Checkpoint {
+  threadId           String  @map("thread_id")
+  checkpointNs       String  @default("") @map("checkpoint_ns")
+  checkpointId       String  @map("checkpoint_id")
+  parentCheckpointId String? @map("parent_checkpoint_id")
+  type               String?
+  checkpoint         Json
+  metadata           Json    @default("{}")
+
+  @@id([threadId, checkpointNs, checkpointId])
+  @@map("checkpoints")
+  @@ignore
+}
+
+model CheckpointBlob {
+  threadId     String @map("thread_id")
+  checkpointNs String @default("") @map("checkpoint_ns")
+  channel      String
+  version      String
+  type         String
+  blob         Bytes?
+
+  @@id([threadId, checkpointNs, channel, version])
+  @@map("checkpoint_blobs")
+  @@ignore
+}
+
+model CheckpointWrite {
+  threadId     String @map("thread_id")
+  checkpointNs String @default("") @map("checkpoint_ns")
+  checkpointId String @map("checkpoint_id")
+  taskId       String @map("task_id")
+  idx          Int
+  channel      String
+  type         String?
+  blob         Bytes
+  taskPath     String @default("") @map("task_path")
+
+  @@id([threadId, checkpointNs, checkpointId, taskId, idx])
+  @@map("checkpoint_writes")
+  @@ignore
 }
 
 model Project {

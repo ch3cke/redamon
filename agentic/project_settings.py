@@ -164,6 +164,11 @@ DEFAULT_AGENT_SETTINGS: dict[str, Any] = {
         'tradecraft_lookup': ['exploitation', 'post_exploitation'],
     },
 
+    # User-managed MCP servers (UI-driven, see /settings/mcp). Stored as raw
+    # JSON list; parsed via mcp_registry.parse_user_servers() at orchestrator
+    # setup time.
+    'USER_MCP_SERVERS': [],
+
     # Kali Shell Library Installation
     'KALI_INSTALL_ENABLED': False,
     'KALI_INSTALL_ALLOWED_PACKAGES': '',
@@ -338,6 +343,11 @@ def fetch_agent_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['LOG_MAX_MB'] = project.get('agentLogMaxMb', DEFAULT_AGENT_SETTINGS['LOG_MAX_MB'])
     settings['LOG_BACKUP_COUNT'] = project.get('agentLogBackupCount', DEFAULT_AGENT_SETTINGS['LOG_BACKUP_COUNT'])
     settings['TOOL_PHASE_MAP'] = project.get('agentToolPhaseMap', DEFAULT_AGENT_SETTINGS['TOOL_PHASE_MAP'])
+    # User-managed MCP servers (UI-driven, see /settings/mcp). The webapp
+    # /api/projects/[id] route includes user.settings.mcpServers in its
+    # response. Stored here as a raw list of dicts; parse_user_servers()
+    # validates and converts to MCPServer instances at orchestrator setup.
+    settings['USER_MCP_SERVERS'] = project.get('userMcpServers', []) or []
     settings['BRUTE_FORCE_MAX_WORDLIST_ATTEMPTS'] = project.get('agentBruteForceMaxWordlistAttempts', DEFAULT_AGENT_SETTINGS['BRUTE_FORCE_MAX_WORDLIST_ATTEMPTS'])
     settings['BRUTEFORCE_SPEED'] = project.get('agentBruteforceSpeed', DEFAULT_AGENT_SETTINGS['BRUTEFORCE_SPEED'])
     settings['KALI_INSTALL_ENABLED'] = project.get('agentKaliInstallEnabled', DEFAULT_AGENT_SETTINGS['KALI_INSTALL_ENABLED'])
@@ -621,20 +631,53 @@ def get_enabled_user_skills() -> list[dict]:
 # =============================================================================
 
 def is_tool_allowed_in_phase(tool_name: str, phase: str) -> bool:
-    """Check if a tool is allowed in the given phase."""
+    """Check if a tool is allowed in the given phase.
+
+    Resolution order:
+    1. Project's TOOL_PHASE_MAP override (per-project, per-tool, set via UI).
+    2. MCP manifest default_phases (for tools declared by user-managed MCP servers).
+    3. Default to all phases (when nothing else specifies).
+    """
     tool_phase_map = get_setting('TOOL_PHASE_MAP', {})
-    allowed_phases = tool_phase_map.get(tool_name, [])
-    return phase in allowed_phases
+    if tool_name in tool_phase_map:
+        return phase in tool_phase_map[tool_name]
+
+    # Fallback to MCP manifest default phases
+    try:
+        from mcp_registry import default_phases_for, manifest_tool_names
+        if tool_name in manifest_tool_names():
+            return phase in default_phases_for(tool_name)
+    except Exception:
+        pass
+
+    return False
 
 
 def get_allowed_tools_for_phase(phase: str) -> list:
-    """Get list of tool names allowed in the given phase."""
+    """Get list of tool names allowed in the given phase.
+
+    Includes both TOOL_PHASE_MAP entries and MCP-manifest-declared tools whose
+    effective default phases include ``phase``.
+    """
     tool_phase_map = get_setting('TOOL_PHASE_MAP', {})
-    return [
+    allowed = {
         tool_name
         for tool_name, allowed_phases in tool_phase_map.items()
         if phase in allowed_phases
-    ]
+    }
+
+    # Union with manifest-declared tools that allow this phase by default
+    try:
+        from mcp_registry import manifest_tool_phase_view
+        for tool_name, default_phases in manifest_tool_phase_view().items():
+            if tool_name in tool_phase_map:
+                continue  # project override wins
+            if phase in default_phases:
+                allowed.add(tool_name)
+    except Exception:
+        pass
+
+    return list(allowed)
 
 
 def get_hydra_flags_from_settings() -> str:
