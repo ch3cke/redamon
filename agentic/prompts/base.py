@@ -4,6 +4,9 @@ RedAmon Agent Base Prompts
 Common prompts used across all attack paths.
 """
 
+import os
+from pathlib import Path
+
 from .tool_registry import TOOL_REGISTRY
 
 
@@ -14,6 +17,156 @@ from .tool_registry import TOOL_REGISTRY
 # =============================================================================
 # DYNAMIC PROMPT BUILDERS
 # =============================================================================
+
+# =============================================================================
+# WORKSPACE LAYOUT BLOCK
+# =============================================================================
+# Always rendered at the top of every think-step system prompt so the agent
+# has a stable mental model of /workspace/<projectId>/ across turns. Without
+# this block the agent has to infer the layout from scattered hints inside
+# individual tool descriptions (only seen when consulting that tool) - so it
+# would default to writing findings to project-root or to tool-outputs/ by
+# mistake. The block costs ~300 tokens; uploads section adds ~100 more only
+# when files are present.
+
+_WORKSPACE_ROOT_FOR_PROMPT = Path(os.environ.get("WORKSPACE_ROOT", "/workspace"))
+
+# Tunable: how many upload filenames to list inline before saying "and more".
+_UPLOADS_PROMPT_MAX_FILES = 20
+
+_WORKSPACE_LAYOUT_HEADER = """## Workspace Layout
+
+Every project has a per-project workspace at /workspace/<projectId>/ with 4
+fixed subdirs. Each has a role - respect them.
+
+- `notes/` - YOUR SCRATCH. Write here freely with fs_write / fs_edit when
+  you want to record findings, draft a report, build a payload file, or
+  hand off context to a future turn or to the user. Examples:
+  `notes/recon-summary.md`, `notes/sqli-payloads.txt`, `notes/todo.md`.
+
+- `tool-outputs/` - AUTO-MANAGED. The executor writes here when a tool's
+  output is too big to inline. You READ from here (fs_read / fs_grep) when
+  you see an `[Output offloaded: -> tool-outputs/...]` marker. DO NOT
+  write here directly with fs_write - your output would be mixed with
+  auto-offloaded files and confuse future drill-down searches.
+
+- `jobs/` - AUTO-MANAGED. job_spawn writes <id>.log + <id>.meta.json here
+  for every background job. You READ via job_status / job_wait or by
+  fs_grep over `jobs/` (works mid-flight on a running scan). DO NOT
+  write here directly.
+
+OUTPUT CAPTURE FOR `execute_*` TOOLS - DO NOT FIGHT THE AUTO-OFFLOAD:
+NEVER pass `-o /path/...`, `-output ...`, `--output-file ...`, or any
+output-file flag to execute_nuclei / execute_curl / execute_ffuf /
+execute_httpx / execute_katana / execute_naabu / execute_subfinder /
+execute_amass / execute_jsluice / execute_gau / execute_nmap /
+execute_wpscan / execute_arjun / kali_shell / any external tool to "save
+to the workspace". Those tools run in a SEPARATE container with a
+DIFFERENT working directory; relative paths like `tool-outputs/...` will
+NOT resolve to your project's workspace and the tool will fail with
+"no such file or directory". Even absolute `/workspace/<projectId>/...`
+paths require you to already know your project_id (you don't).
+
+INSTEAD: let the tool print to stdout. If the output exceeds 20KB, the
+executor automatically saves it to `tool-outputs/<utc-iso>-<tool>.txt`
+and returns you a head/tail stub with the exact path. Use fs_read +
+fs_grep on that path to drill in. This is the design - work WITH the
+auto-offload pipeline, not against it.
+
+JOB SPAWN POLICY - decide per call, not by default:
+
+SPAWN with job_spawn when ALL hold:
+  - The tool will take >60s (deep nuclei / katana / ffuf, hydra brute
+    force, metasploit_console for fire-and-forget exploit, long
+    `kali_shell sleep`, slow recon)
+  - You have OTHER useful work to do meanwhile (research, graph queries,
+    notes writing) - otherwise spawning just adds bookkeeping and you
+    block on job_wait anyway
+  - You don't need live step-by-step feedback in the chat stream
+
+DO NOT spawn these (overhead > benefit; they return in <2s):
+  - tradecraft_lookup, query_graph, web_search, cve_intel, shodan,
+    google_dork, msf_restart, fs_* tools, any HTTP single-shot
+    (execute_curl, execute_httpx for one URL)
+
+LOSES LIVE PROGRESS when spawned (call foreground if you want to watch):
+  - metasploit_console for step-by-step exploit walkthrough (spawned
+    jobs use plain execute(), bypassing the progress-polling tee)
+  - execute_hydra when you want to see attempts tick by
+  - kali_shell for tail-f-style commands
+
+After spawning: `fs_grep` over `jobs/<id>.log` for mid-flight peek,
+`job_status` for status + tail, `job_wait` to chunk a long wait,
+`job_cancel` to stop. Multiple jobs run truly in parallel."""
+
+_WORKSPACE_LAYOUT_FOOTER = (
+    "If you need a custom subtree (e.g. `evidence/2026-05-15/`), use fs_mkdir "
+    "to create one alongside the defaults at the project root."
+)
+
+
+def _list_uploads(project_id: str, max_files: int = _UPLOADS_PROMPT_MAX_FILES) -> list[str]:
+    """Return filenames inside uploads/ for the prompt, newest first.
+
+    Empty list if dir doesn't exist or is empty - the layout block then
+    omits the USER INBOX section entirely. Symlinks count as files (the
+    user might symlink a host wordlist into uploads/).
+    """
+    if not project_id:
+        return []
+    uploads_dir = _WORKSPACE_ROOT_FOR_PROMPT / project_id / "uploads"
+    if not uploads_dir.is_dir():
+        return []
+    try:
+        candidates = [
+            p for p in uploads_dir.iterdir()
+            if p.is_file() or p.is_symlink()
+        ]
+        candidates.sort(
+            key=lambda p: p.stat().st_mtime if p.exists() else 0,
+            reverse=True,
+        )
+    except OSError:
+        return []
+    return [p.name for p in candidates[:max_files]]
+
+
+def build_workspace_layout_block(project_id: str) -> str:
+    """Render the workspace-layout block for the system prompt.
+
+    Includes the USER INBOX (`uploads/`) section ONLY when uploads/ has at
+    least one file, and lists up to _UPLOADS_PROMPT_MAX_FILES filenames so
+    the agent immediately knows what the user has staged. Suppressing the
+    section on empty avoids nagging the agent about a folder that doesn't
+    matter for the current task.
+    """
+    parts = [_WORKSPACE_LAYOUT_HEADER]
+    uploads = _list_uploads(project_id)
+    if uploads:
+        n = len(uploads)
+        plural = "s" if n != 1 else ""
+        # Cap signal: if we hit the cap, there might be more.
+        more_hint = ""
+        # Best-effort: list count over cap if dir actually has more.
+        try:
+            real_count = sum(
+                1 for p in (_WORKSPACE_ROOT_FOR_PROMPT / project_id / "uploads").iterdir()
+                if p.is_file() or p.is_symlink()
+            )
+            if real_count > n:
+                more_hint = f" (showing newest {n} of {real_count})"
+        except OSError:
+            pass
+        listing = "\n".join(f"  - `uploads/{name}`" for name in uploads)
+        parts.append(
+            f"\n- `uploads/` - USER INBOX. The user has staged "
+            f"{n} file{plural}{more_hint} for you to use. CHECK THESE NOW:\n"
+            f"{listing}\n"
+            f"  Read via fs_read / fs_glob `uploads/*`; do NOT write here."
+        )
+    parts.append("\n" + _WORKSPACE_LAYOUT_FOOTER)
+    return "\n".join(parts)
+
 
 def _get_visible_tools(allowed_tools):
     """Get TOOL_REGISTRY entries for allowed tools, preserving registry order."""

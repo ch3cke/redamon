@@ -282,6 +282,15 @@ async def think_node(state: AgentState, config, *, llm, guidance_queues, neo4j_c
     if get_setting('DEEP_THINK_ENABLED', False):
         system_prompt += DEEP_THINK_SELF_REQUEST_INSTRUCTION
 
+    # Inject the workspace-layout doc on every think step. The block teaches
+    # the agent which folder is for what (notes/ = scratch, tool-outputs/ +
+    # jobs/ = auto-managed, uploads/ = user inbox). The uploads/ section
+    # only appears when files are actually present - keeps the prompt lean
+    # when the user hasn't staged anything.
+    from prompts.base import build_workspace_layout_block
+    workspace_block = build_workspace_layout_block(project_id)
+    system_prompt = workspace_block + "\n\n" + system_prompt
+
     # Inject stealth mode rules if enabled (prepended for maximum priority)
     if get_setting('STEALTH_MODE', False):
         from prompts.stealth_rules import STEALTH_MODE_RULES

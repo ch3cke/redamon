@@ -351,6 +351,8 @@ services:
       - ./mcp/nuclei-templates:/opt/nuclei-templates:ro
       # Shared tenant_filter.py used by the redagraph CLI
       - ./graph_db:/opt/graph_db:ro
+      # Shared agent workspace — agent writes tool-outputs / jobs here; kali tools can read
+      - ./agentic/agent-workspace:/workspace
     environment:
       PYTHONUNBUFFERED: "1"
       PYTHONPATH: /opt:/opt/mcp_servers
@@ -434,6 +436,8 @@ services:
       - ./knowledge_base/kb_config.yaml:/app/knowledge_base/kb_config.yaml:ro
       - ./knowledge_base/data:/app/knowledge_base/data
       - tradecraft_cache:/app/tradecraft_cache
+      # Per-project workspace — fs_* tools, output offloading, background jobs
+      - ./agentic/agent-workspace:/workspace
     depends_on:
       neo4j:
         condition: service_healthy

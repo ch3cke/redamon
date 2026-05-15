@@ -65,6 +65,7 @@ export function AIAssistantDrawer({
   hasOtherChains = false,
   requireToolConfirmation = true,
   graphViewCypher,
+  onOpenFileSystem,
 }: AIAssistantDrawerProps) {
   // ─── State hooks ─────────────────────────────────────────────────────────────
   const [activeSkill, setActiveSkill] = useState<ActiveSkill | null>(null)
@@ -330,6 +331,7 @@ export function AIAssistantDrawer({
         handleDownloadMarkdown={handleDownloadMarkdown}
         chatItems={chatItems}
         onClose={onClose}
+        onOpenFileSystem={onOpenFileSystem}
         conversations={conversations}
         handleSelectConversation={handleSelectConversation}
         handleDeleteConversation={handleDeleteConversation}

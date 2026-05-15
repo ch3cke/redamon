@@ -634,10 +634,17 @@ def is_tool_allowed_in_phase(tool_name: str, phase: str) -> bool:
     """Check if a tool is allowed in the given phase.
 
     Resolution order:
-    1. Project's TOOL_PHASE_MAP override (per-project, per-tool, set via UI).
-    2. MCP manifest default_phases (for tools declared by user-managed MCP servers).
-    3. Default to all phases (when nothing else specifies).
+    1. Foundational fs_*/job_* tools: always allowed (phase-agnostic, like query_graph).
+    2. Project's TOOL_PHASE_MAP override (per-project, per-tool, set via UI).
+    3. MCP manifest default_phases (for tools declared by user-managed MCP servers).
+    4. Default to all phases (when nothing else specifies).
     """
+    # fs_* (workspace filesystem) and job_* (background runner) are infrastructure
+    # tools - blocking them by phase makes no sense. They cannot reach the network
+    # or run scans on their own; only what runs through them is phase-relevant.
+    if tool_name.startswith("fs_") or tool_name.startswith("job_"):
+        return True
+
     tool_phase_map = get_setting('TOOL_PHASE_MAP', {})
     if tool_name in tool_phase_map:
         return phase in tool_phase_map[tool_name]
@@ -657,7 +664,15 @@ def get_allowed_tools_for_phase(phase: str) -> list:
     """Get list of tool names allowed in the given phase.
 
     Includes both TOOL_PHASE_MAP entries and MCP-manifest-declared tools whose
-    effective default phases include ``phase``.
+    effective default phases include ``phase``. Always includes foundational
+    fs_*/job_* tools (Phase-2 bypass also lives in is_tool_allowed_in_phase).
+
+    BUG #20 regression: this function previously returned only TOOL_PHASE_MAP +
+    manifest tools, omitting the foundational fs_*/job_* set entirely. The
+    LLM's available-tools enum is built from this list - so the agent never
+    saw fs_mkdir / fs_write / job_spawn / etc. and fell back to
+    `kali_shell "mkdir -p"` for filesystem ops, defeating the whole point of
+    the in-process workspace tools.
     """
     tool_phase_map = get_setting('TOOL_PHASE_MAP', {})
     allowed = {
@@ -665,6 +680,17 @@ def get_allowed_tools_for_phase(phase: str) -> list:
         for tool_name, allowed_phases in tool_phase_map.items()
         if phase in allowed_phases
     }
+
+    # Always include foundational workspace + job tools (mirror of the
+    # fs_/job_ bypass in is_tool_allowed_in_phase). Import lazily to keep
+    # this module heavyweight-dep free.
+    try:
+        from workspace_fs import FS_TOOL_NAMES
+        from job_runner import JOB_TOOL_NAMES
+        allowed.update(FS_TOOL_NAMES)
+        allowed.update(JOB_TOOL_NAMES)
+    except Exception:
+        pass
 
     # Union with manifest-declared tools that allow this phase by default
     try:

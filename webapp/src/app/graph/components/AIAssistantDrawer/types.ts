@@ -78,4 +78,5 @@ export interface AIAssistantDrawerProps {
   hasOtherChains?: boolean
   requireToolConfirmation?: boolean
   graphViewCypher?: string
+  onOpenFileSystem?: () => void
 }

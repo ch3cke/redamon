@@ -8,6 +8,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 
+## [4.10.0] - 2026-05-15
+
+### Added
+
+- **Per-project workspace filesystem** ([docker-compose.yml](docker-compose.yml), [agentic/workspace_fs.py](agentic/workspace_fs.py)) — every project gets a persistent `/workspace/<projectId>/` bind-mount visible from the agent, the kali-sandbox, and the host. Auto-creates `notes/`, `tool-outputs/`, `jobs/`, `uploads/` on first access. All paths are validated against the project root (`..` traversal, absolute escape, symlink escape all rejected).
+
+- **24 in-process workspace tools for the agent** ([agentic/workspace_fs.py](agentic/workspace_fs.py), [agentic/prompts/tool_registry.py](agentic/prompts/tool_registry.py)) — `fs_read`, `fs_read_many`, `fs_stat`, `fs_write`, `fs_edit`, `fs_multi_edit`, `fs_undo_edit`, `fs_delete`, `fs_move`, `fs_copy`, `fs_mkdir`, `fs_chmod`, `fs_symlink_create`, `fs_grep` (ripgrep wrapper), `fs_glob`, `fs_find`, `fs_list`, `fs_tree`, `fs_symbols` (tree-sitter AST for 15 languages), `fs_symlink_read`, `fs_hash`, `fs_diff` (incl. `vs_last_read` snapshot mode for stale-read detection), `fs_extract` (zip-slip + tar-slip safe), `fs_archive`. Atomic writes via tmp+rename; per-file undo stack capped at 20.
+
+- **5 background-job tools** ([agentic/job_runner.py](agentic/job_runner.py)) — `job_spawn`, `job_status`, `job_wait`, `job_cancel`, `job_list`. Long-running scans (nuclei, hydra) detach as asyncio tasks and stream output to `jobs/<id>.log` so `fs_grep` works mid-flight. State survives agent restart: orphan `running` jobs flip to `interrupted` via `recover_on_boot` at lifespan startup.
+
+- **Tool-output auto-offload** ([agentic/output_offload.py](agentic/output_offload.py), [agentic/tool_offload_policy.py](agentic/tool_offload_policy.py)) — outputs over 20KB get written to `tool-outputs/<utc-iso>-<tool>.txt` automatically and the LLM receives a head/tail stub with the file path. Per-tool policy map (`never`/`always`/`auto`) + per-call `output_mode` override (`inline`/`file`/`auto`). Char-capped head/tail (4KB/2KB) so single-line blobs (base64, minified JSON) don't defeat the offload.
+
+- **Workspace HTTP API** ([agentic/api.py](agentic/api.py), [webapp/src/app/api/agent/workspace/](webapp/src/app/api/agent/workspace/)) — 13 endpoints powering the drawer: `list`, `tree`, `download`, `upload` (multipart with 409-on-collision), `mkdir`, `rename`, `delete`, `archive-download` (folder → tar.gz), `bulk-archive` (N selected → one tar.gz), `preview`, `properties`, `jobs`, `jobs/<id>/cancel`. All proxied through the existing cookie-auth webapp middleware.
+
+- **FileSystemDrawer in the graph view** ([webapp/src/app/graph/components/FileSystemDrawer/](webapp/src/app/graph/components/FileSystemDrawer/), [webapp/src/app/graph/page.tsx](webapp/src/app/graph/page.tsx), [webapp/src/app/graph/components/GraphToolbar/GraphToolbar.tsx](webapp/src/app/graph/components/GraphToolbar/GraphToolbar.tsx), [webapp/src/app/graph/components/AIAssistantDrawer/DrawerHeader.tsx](webapp/src/app/graph/components/AIAssistantDrawer/DrawerHeader.tsx)) — left-side drawer with **Files** tab (breadcrumb navigation, sort by name/size/modified, filter box, multi-select with bulk download/delete, drag-and-drop upload with overwrite confirmation, inline file preview with text + binary-safe fallback, properties popover showing SHA-256 + mode + mtime + symlink target, per-folder download as `.tar.gz`) and **Jobs** tab (live status badges, log view, cancel). Auto-refreshes every 5s while open (paused during preview). Two entry points: folder icon in the graph toolbar and folder icon in the AI drawer header — opening either closes the NodeDrawer first.
+
+- **Protected default subdirs** ([agentic/workspace_fs.py](agentic/workspace_fs.py)) — `notes/`, `tool-outputs/`, `jobs/`, `uploads/` cannot be renamed or deleted from the drawer (frontend Lock badge + backend enforcement at `delete_for_project` / `rename_for_project`). Files INSIDE them remain fully editable. Bulk delete with mixed selection silently skips protected entries and explains in the confirm modal.
+
+- **`WORKSPACE_LAYOUT_BLOCK` prepended to every think-step prompt** ([agentic/prompts/base.py](agentic/prompts/base.py), [agentic/orchestrator_helpers/nodes/think_node.py](agentic/orchestrator_helpers/nodes/think_node.py)) — teaches the agent which folder is for what (`notes/` = scratch, `tool-outputs/` + `jobs/` = auto-managed read-only, `uploads/` = user inbox). The `uploads/` section only renders when files are present, with a `CHECK THESE NOW` directive listing each staged filename (newest first, capped at 20) so the agent reflexively reads what the user dropped.
+
+- **WebSocket `job_update` events** ([agentic/ws_job_emitter.py](agentic/ws_job_emitter.py), [agentic/websocket_api.py](agentic/websocket_api.py)) — JobRegistry pushes lifecycle transitions through the existing chat WS so the drawer's Jobs tab updates instantly instead of waiting for the 5s poll fallback. Per-project fan-out, send-failure tolerant.
+
+### Fixed
+
+- **Workspace tools were invisible to the LLM** ([agentic/project_settings.py](agentic/project_settings.py)) — `get_allowed_tools_for_phase()` only returned `TOOL_PHASE_MAP` keys and MCP-manifest tools, so the 24 `fs_*` and 5 `job_*` tools never made it into the agent's available-tools enum. Agent fell back to `kali_shell "mkdir -p /workspace/foo"` (project-unscoped, polluted the bind-mount root). Added foundational-tool bypass mirroring the existing `is_tool_allowed_in_phase` pattern + 3 regression tests.
+
+- **Webapp test suite project-wide non-functional** ([webapp/vitest.config.ts](webapp/vitest.config.ts), [webapp/vitest.setup.ts](webapp/vitest.setup.ts)) — webapp container had `NODE_ENV=production` baked in, so React 19's `act` (test-only API) was stripped from the prod bundle. Every `render()`-based test failed at module load with `TypeError: React.act is not a function`. Set `NODE_ENV=test` in vitest config + registered `@testing-library/jest-dom` matchers via setup file — unblocks ~1700 component tests project-wide.
+
+- **Stale preview / properties on drawer reopen and project switch** ([webapp/src/app/graph/components/FileSystemDrawer/FileSystemDrawer.tsx](webapp/src/app/graph/components/FileSystemDrawer/FileSystemDrawer.tsx)) — the reset `useEffect` only reset `currentPath` and `tab`, leaving `previewing` and `propertiesFor` set. Closing + reopening the drawer (or switching projects) showed the previous file's preview or a SHA-256 from a different project. Added preview/properties/selection/filter clears + `projectId` to the deps array.
+
+### Security
+
+- **Project-id injection via HTTP query string** ([agentic/workspace_fs.py](agentic/workspace_fs.py)) — `projectId="../etc"` made `WORKSPACE_ROOT / projectId` resolve to the workspace's parent directory; every subsequent path check then treated that escaped location as the project root, letting an authenticated caller read/write arbitrary host paths the agent had access to. New `_validate_project_id()` rejects `/`, `\`, null byte, leading `.`, or `..`. Verified live: traversal probes return clean 400s; UUID project-ids still work.
+
+- **Protected-subdir bypass via path normalization** ([agentic/workspace_fs.py](agentic/workspace_fs.py)) — `./notes`, `notes/`, `notes//`, `./` all bypassed `is_protected_path()` because the naive `.split("/")` check ran without normalization. A caller sending `path=./notes` to DELETE could wipe a protected default subdir. Normalizes with `os.path.normpath` first; 11 variants regression-pinned.
+
+- **ZIP archive leaked symlink-target content** ([agentic/workspace_fs.py](agentic/workspace_fs.py)) — `zipfile.write(symlink)` follows the symlink at OS level and stores the target's content under the symlink's name. A workspace symlink to `/etc/passwd` would have been served inline in the downloaded `.zip` via `archive-download` or `bulk-archive`. Skip symlinks in both `archive_dir_for_project` and `bulk_archive_for_project` (tar.gz and zip paths).
+
+- **Workspace files were unwritable from the host** ([agentic/api.py](agentic/api.py)) — agent container runs as root, so files it created in the bind-mount ended up `root:root` mode 644/755; host user (UID 1000) couldn't `rm` or edit workspace files. `os.umask(0)` at agent lifespan startup so new files get 0o666 / dirs 0o777. Verified via `/proc/1/status` on the live container.
+
+- **`fs_copy` preserved restrictive source modes** ([agentic/workspace_fs.py](agentic/workspace_fs.py)) — `shutil.copy2` copies file metadata including permissions; a source at 0o600 produced a 0o600 copy, defeating the umask intent and locking the host user out of the copy. Explicit `os.chmod` after `copy2` + recursive normalization helper for `copytree` (dirs → 0o777, files → 0o666).
+
+- **Download anchor navigated the page on server error** ([webapp/src/app/graph/components/FileSystemDrawer/FileSystemDrawer.tsx](webapp/src/app/graph/components/FileSystemDrawer/FileSystemDrawer.tsx)) — `window.location.href = url` would navigate away from the graph view (losing session state) if the backend returned a JSON error response. Replaced with an anchor element using the `download` attribute — happy path triggers the browser download dialog, errors save the JSON as a file but never navigate.
+
+
+---
+
+
 ## [4.9.3] - 2026-05-12
 
 ### Added

@@ -21,7 +21,7 @@ from typing import Optional
 
 import httpx
 import websockets
-from fastapi import FastAPI, Query, WebSocket
+from fastapi import FastAPI, File, Form, Query, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -31,7 +31,10 @@ from logging_config import setup_logging
 from orchestrator import AgentOrchestrator
 from orchestrator_helpers import normalize_content
 from utils import get_session_count
-from websocket_api import WebSocketManager, websocket_endpoint
+from websocket_api import WebSocketManager, websocket_endpoint, MessageType
+import workspace_fs
+import job_runner
+import ws_job_emitter
 
 # Initialize logging with file rotation
 setup_logging(log_level=logging.INFO, log_to_console=True, log_to_file=True)
@@ -50,6 +53,14 @@ async def lifespan(app: FastAPI):
     """
     global orchestrator, ws_manager
 
+    # Agent container runs as root; bind-mounted /workspace files would
+    # otherwise end up root:root on the host (UID 1000), breaking the
+    # plan's promise that the workspace is browsable/editable directly
+    # from the host. umask 0 makes new dirs world-writable (0777) and
+    # new files world-readable+writable (0666), so the host user can
+    # rm/edit them. Ownership still root, but mode 666/777 makes that OK.
+    os.umask(0)
+
     logger.info("Starting RedAmon Agent API...")
 
     # Initialize orchestrator
@@ -58,6 +69,20 @@ async def lifespan(app: FastAPI):
 
     # Initialize WebSocket manager
     ws_manager = WebSocketManager()
+
+    # Background job recovery: flip any meta files marked 'running' on disk
+    # (from a previous agent process that died mid-job) to 'interrupted' so
+    # the drawer can show their final state correctly. In-flight asyncio
+    # tasks are gone by definition - this is a state-only fixup.
+    reg = job_runner.get_registry()
+    reg.recover_on_boot()
+
+    # Wire the JobRegistry to push job_update events through the WS manager
+    # so the frontend drawer sees status changes in real time. The emitter
+    # lives in ws_job_emitter.py so it stays unit-testable without the
+    # full FastAPI/langgraph stack.
+    ws_job_emitter.set_ws_manager(ws_manager)
+    reg.set_ws_emitter(ws_job_emitter.emit_job_update)
 
     logger.info("RedAmon Agent API ready (WebSocket)")
 
@@ -1868,7 +1893,296 @@ async def download_file(
 
 
 # =============================================================================
-# COMMAND WHISPERER — NLP-to-command translation using the project's LLM
+# WORKSPACE - per-project filesystem + background-job HTTP endpoints
+# =============================================================================
+# All routes are project-scoped (projectId is required) and use the same
+# _resolve_safe validator as the fs_* tools, so path traversal and symlink
+# escape attempts are rejected at the boundary. The webapp drawer + AI panel
+# both consume these.
+
+
+@app.get("/workspace/list", tags=["Workspace"])
+async def workspace_list(
+    projectId: str = Query(..., description="Project UUID"),
+    path: str = Query(".", description="Subdir relative to /workspace/<projectId>/"),
+):
+    """Directory listing as structured JSON for the drawer Files tab."""
+    if not projectId:
+        return JSONResponse(content={"error": "projectId required"}, status_code=400)
+    try:
+        entries = workspace_fs.list_dir_for_project(projectId, path)
+        return {"projectId": projectId, "path": path, "entries": entries}
+    except ValueError as e:
+        return JSONResponse(content={"error": str(e)}, status_code=400)
+    except Exception as e:
+        logger.error(f"/workspace/list failed: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.get("/workspace/tree", tags=["Workspace"])
+async def workspace_tree(
+    projectId: str = Query(...),
+    path: str = Query("."),
+    maxDepth: int = Query(3, ge=1, le=10),
+    maxEntries: int = Query(500, ge=10, le=5000),
+):
+    """ASCII tree view of a workspace subtree."""
+    if not projectId:
+        return JSONResponse(content={"error": "projectId required"}, status_code=400)
+    try:
+        return {"projectId": projectId, "path": path,
+                "tree": workspace_fs.tree_for_project(projectId, path, maxDepth, maxEntries)}
+    except ValueError as e:
+        return JSONResponse(content={"error": str(e)}, status_code=400)
+    except Exception as e:
+        logger.error(f"/workspace/tree failed: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.get("/workspace/download", tags=["Workspace"])
+async def workspace_download(
+    projectId: str = Query(...),
+    path: str = Query(...),
+):
+    """Stream file bytes directly from the bind-mount (no kali_shell round-trip)."""
+    if not projectId:
+        return Response(content="projectId required", status_code=400)
+    try:
+        content_bytes, mime = workspace_fs.download_for_project(projectId, path)
+    except ValueError as e:
+        return Response(content=str(e), status_code=400)
+    except Exception as e:
+        logger.error(f"/workspace/download failed: {e}")
+        return Response(content=str(e), status_code=500)
+    filename = os.path.basename(path) or "download"
+    return Response(
+        content=content_bytes,
+        media_type=mime,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(content_bytes)),
+        },
+    )
+
+
+class WorkspaceRenameRequest(BaseModel):
+    projectId: str
+    path: str
+    newName: str
+
+
+@app.post("/workspace/rename", tags=["Workspace"])
+async def workspace_rename(req: WorkspaceRenameRequest):
+    """Rename a single entry within its parent (no cross-dir moves)."""
+    if not req.projectId:
+        return JSONResponse(content={"error": "projectId required"}, status_code=400)
+    try:
+        new_path = workspace_fs.rename_for_project(req.projectId, req.path, req.newName)
+        return {"projectId": req.projectId, "path": new_path}
+    except ValueError as e:
+        return JSONResponse(content={"error": str(e)}, status_code=400)
+    except Exception as e:
+        logger.error(f"/workspace/rename failed: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.delete("/workspace", tags=["Workspace"])
+async def workspace_delete(
+    projectId: str = Query(...),
+    path: str = Query(...),
+    recursive: bool = Query(False),
+):
+    """Delete a file or directory (recursive required for dirs)."""
+    if not projectId:
+        return JSONResponse(content={"error": "projectId required"}, status_code=400)
+    try:
+        workspace_fs.delete_for_project(projectId, path, recursive)
+        return {"projectId": projectId, "path": path, "deleted": True}
+    except ValueError as e:
+        return JSONResponse(content={"error": str(e)}, status_code=400)
+    except Exception as e:
+        logger.error(f"/workspace/delete failed: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.get("/workspace/jobs", tags=["Workspace"])
+async def workspace_jobs_list(
+    projectId: str = Query(...),
+    active: Optional[bool] = Query(None, description="True=running only, False=terminal only, omit for all"),
+):
+    """List background jobs for the drawer Jobs tab."""
+    if not projectId:
+        return JSONResponse(content={"error": "projectId required"}, status_code=400)
+    reg = job_runner.get_registry()
+    return {"projectId": projectId, "jobs": reg.list(projectId, active=active)}
+
+
+@app.post("/workspace/jobs/{job_id}/cancel", tags=["Workspace"])
+async def workspace_job_cancel(
+    job_id: str,
+    projectId: str = Query(...),
+):
+    """Cancel a running background job."""
+    if not projectId:
+        return JSONResponse(content={"error": "projectId required"}, status_code=400)
+    reg = job_runner.get_registry()
+    result = await reg.cancel(projectId, job_id)
+    return result
+
+
+@app.post("/workspace/upload", tags=["Workspace"])
+async def workspace_upload(
+    projectId: str = Form(...),
+    path: str = Form("."),
+    overwrite: bool = Form(False),
+    file: UploadFile = File(...),
+):
+    """Multipart file upload into a workspace directory.
+
+    409 (`code: exists`) on name collision when `overwrite=False` so the
+    frontend can prompt for confirmation, then retry with `overwrite=true`.
+    """
+    if not projectId:
+        return JSONResponse(content={"error": "projectId required"}, status_code=400)
+    try:
+        file_bytes = await file.read()
+        new_path = workspace_fs.upload_for_project(
+            projectId, path, file_bytes, file.filename or "uploaded", overwrite=overwrite,
+        )
+        return {"projectId": projectId, "path": new_path, "size": len(file_bytes)}
+    except FileExistsError as e:
+        return JSONResponse(
+            content={"error": str(e), "code": "exists"}, status_code=409,
+        )
+    except ValueError as e:
+        return JSONResponse(content={"error": str(e)}, status_code=400)
+    except Exception as e:
+        logger.error(f"/workspace/upload failed: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+class WorkspaceMkdirRequest(BaseModel):
+    projectId: str
+    path: str
+
+
+@app.post("/workspace/mkdir", tags=["Workspace"])
+async def workspace_mkdir(req: WorkspaceMkdirRequest):
+    """Create a new directory (parents created automatically)."""
+    if not req.projectId:
+        return JSONResponse(content={"error": "projectId required"}, status_code=400)
+    try:
+        new_path = workspace_fs.mkdir_for_project(req.projectId, req.path)
+        return {"projectId": req.projectId, "path": new_path}
+    except ValueError as e:
+        return JSONResponse(content={"error": str(e)}, status_code=400)
+    except Exception as e:
+        logger.error(f"/workspace/mkdir failed: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+class WorkspaceBulkArchiveRequest(BaseModel):
+    projectId: str
+    paths: list[str]
+    format: str = "tar.gz"
+    archiveName: str = "bundle"
+
+
+@app.post("/workspace/bulk-archive", tags=["Workspace"])
+async def workspace_bulk_archive(req: WorkspaceBulkArchiveRequest):
+    """Bundle N workspace entries into one tar.gz/zip; stream back to client.
+
+    POST (not GET) because the list of paths can be long and we want a JSON
+    body for clarity over a megalong query string.
+    """
+    if not req.projectId:
+        return Response(content="projectId required", status_code=400)
+    try:
+        archive_bytes, filename = workspace_fs.bulk_archive_for_project(
+            req.projectId, req.paths, format=req.format, archive_name=req.archiveName,
+        )
+    except ValueError as e:
+        return Response(content=str(e), status_code=400)
+    except Exception as e:
+        logger.error(f"/workspace/bulk-archive failed: {e}")
+        return Response(content=str(e), status_code=500)
+    mime = "application/gzip" if req.format == "tar.gz" else "application/zip"
+    return Response(
+        content=archive_bytes,
+        media_type=mime,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(archive_bytes)),
+        },
+    )
+
+
+@app.get("/workspace/archive-download", tags=["Workspace"])
+async def workspace_archive_download(
+    projectId: str = Query(...),
+    path: str = Query(...),
+    format: str = Query("tar.gz"),
+):
+    """Stream a directory as a tar.gz or zip archive."""
+    if not projectId:
+        return Response(content="projectId required", status_code=400)
+    try:
+        archive_bytes, filename = workspace_fs.archive_dir_for_project(
+            projectId, path, format=format,
+        )
+    except ValueError as e:
+        return Response(content=str(e), status_code=400)
+    except Exception as e:
+        logger.error(f"/workspace/archive-download failed: {e}")
+        return Response(content=str(e), status_code=500)
+    mime = "application/gzip" if format == "tar.gz" else "application/zip"
+    return Response(
+        content=archive_bytes,
+        media_type=mime,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(archive_bytes)),
+        },
+    )
+
+
+@app.get("/workspace/preview", tags=["Workspace"])
+async def workspace_preview(
+    projectId: str = Query(...),
+    path: str = Query(...),
+    maxBytes: int = Query(1024 * 1024, ge=1, le=10 * 1024 * 1024),
+):
+    """File preview for the inline viewer pane (text or base64 binary)."""
+    if not projectId:
+        return JSONResponse(content={"error": "projectId required"}, status_code=400)
+    try:
+        return workspace_fs.preview_for_project(projectId, path, max_bytes=maxBytes)
+    except ValueError as e:
+        return JSONResponse(content={"error": str(e)}, status_code=400)
+    except Exception as e:
+        logger.error(f"/workspace/preview failed: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.get("/workspace/properties", tags=["Workspace"])
+async def workspace_properties(
+    projectId: str = Query(...),
+    path: str = Query(...),
+):
+    """Rich metadata for the properties popover (size, mtime, mode, sha256)."""
+    if not projectId:
+        return JSONResponse(content={"error": "projectId required"}, status_code=400)
+    try:
+        return workspace_fs.properties_for_project(projectId, path)
+    except ValueError as e:
+        return JSONResponse(content={"error": str(e)}, status_code=400)
+    except Exception as e:
+        logger.error(f"/workspace/properties failed: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+# =============================================================================
+# COMMAND WHISPERER - NLP-to-command translation using the project's LLM
 # =============================================================================
 
 _COMMAND_WHISPERER_SYSTEM_PROMPT = """You are a command-line expert for penetration testing.

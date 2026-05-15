@@ -1,6 +1,6 @@
 'use client'
 
-import { Bot, Play, Download, Loader2, Terminal, Shield, Github, Target, Zap, MessageSquare, Pause, Square, ShieldAlert } from 'lucide-react'
+import { Bot, Play, Download, Loader2, Terminal, Shield, Github, Target, Zap, MessageSquare, Pause, Square, ShieldAlert, FolderOpen } from 'lucide-react'
 import { StealthIcon } from '@/components/icons/StealthIcon'
 import { Toggle, WikiInfoButton } from '@/components/ui'
 import type { ReconStatus, GvmStatus, GithubHuntStatus, TrufflehogStatus, PartialReconState } from '@/lib/recon-types'
@@ -15,6 +15,8 @@ interface GraphToolbarProps {
   onToggleLabels: (value: boolean) => void
   onToggleAI?: () => void
   isAIOpen?: boolean
+  onOpenFileSystem?: () => void
+  isFileSystemOpen?: boolean
   // Target info
   targetDomain?: string
   subdomainList?: string[]
@@ -96,6 +98,8 @@ export function GraphToolbar({
   onToggleLabels,
   onToggleAI,
   isAIOpen = false,
+  onOpenFileSystem,
+  isFileSystemOpen = false,
   // Target info
   targetDomain,
   subdomainList = [],
@@ -459,6 +463,19 @@ export function GraphToolbar({
               )
             })()}
           </div>
+        )}
+
+        {onOpenFileSystem && (
+          <button
+            className={`${styles.aiButton} ${isFileSystemOpen ? styles.aiButtonActive : ''}`}
+            onClick={onOpenFileSystem}
+            aria-label="Toggle Workspace"
+            aria-expanded={isFileSystemOpen}
+            title="Workspace files + background jobs"
+            style={{ marginRight: 4 }}
+          >
+            <FolderOpen size={14} />
+          </button>
         )}
 
         <button

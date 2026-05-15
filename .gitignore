@@ -1,3 +1,7 @@
+# Agent workspace bind-mount (per-project scratch / tool-outputs / jobs)
+agentic/agent-workspace/*
+!agentic/agent-workspace/.gitkeep
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

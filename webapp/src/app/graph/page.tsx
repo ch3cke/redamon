@@ -3,6 +3,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { GraphToolbar } from './components/GraphToolbar'
+import { FileSystemDrawer } from './components/FileSystemDrawer'
 import { GraphCanvas, AUTO_2D_THRESHOLD } from './components/GraphCanvas'
 import { NodeDrawer } from './components/NodeDrawer'
 import { AIAssistantDrawer } from './components/AIAssistantDrawer'
@@ -70,6 +71,7 @@ export default function GraphPage() {
     setShowLabels,
   } = useGraphViewPrefs(projectId)
   const [isAIOpen, setIsAIOpen] = useState(false)
+  const [isFileSystemOpen, setIsFileSystemOpen] = useState(false)
   const [isReconModalOpen, setIsReconModalOpen] = useState(false)
   const [activeLogsDrawer, setActiveLogsDrawer] = useState<'recon' | 'gvm' | 'githubHunt' | 'trufflehog' | `partialRecon:${string}` | null>(null)
   const [hasReconData, setHasReconData] = useState(false)
@@ -94,6 +96,17 @@ export default function GraphPage() {
     expandChild,
     collapseChild,
   } = useNodeSelection()
+  // Opening the FS drawer must close the node drawer first - both live on
+  // the left edge of the graph; otherwise the FS would slide over the node
+  // panel and the user would see a confusing stack.
+  const openFileSystemDrawer = useCallback(() => {
+    clearSelection()
+    setIsFileSystemOpen(true)
+  }, [clearSelection])
+  const handleNodeClick = useCallback((node: Parameters<typeof selectNode>[0]) => {
+    setIsFileSystemOpen(false)
+    selectNode(node)
+  }, [selectNode])
   const dimensions = useDimensions(contentRef)
 
   // Close all drawers when project changes
@@ -1163,6 +1176,8 @@ export default function GraphPage() {
         onToggleLabels={setShowLabels}
         onToggleAI={handleToggleAI}
         isAIOpen={isAIOpen}
+        onOpenFileSystem={openFileSystemDrawer}
+        isFileSystemOpen={isFileSystemOpen}
         // Target info
         targetDomain={currentProject?.targetDomain}
         subdomainList={currentProject?.subdomainList}
@@ -1325,7 +1340,7 @@ export default function GraphPage() {
               height={dimensions.height}
               showLabels={showLabels}
               selectedNode={selectedNode}
-              onNodeClick={selectNode}
+              onNodeClick={handleNodeClick}
               isDark={isDark}
               activeChainId={sessionId}
             />
@@ -1514,6 +1529,13 @@ export default function GraphPage() {
         hasOtherChains={sessionChainIds.length > 1 || (sessionChainIds.length === 1 && sessionChainIds[0] !== sessionId)}
         requireToolConfirmation={currentProject?.agentRequireToolConfirmation ?? true}
         graphViewCypher={selectedFilterCypher}
+        onOpenFileSystem={openFileSystemDrawer}
+      />
+
+      <FileSystemDrawer
+        isOpen={isFileSystemOpen}
+        onClose={() => setIsFileSystemOpen(false)}
+        projectId={projectId || ''}
       />
 
       <ReconConfirmModal
