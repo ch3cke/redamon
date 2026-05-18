@@ -494,7 +494,9 @@ async def fireteam_deploy_node(
     plan_data["fireteam_id"] = fireteam_id_key
 
     max_concurrent = get_setting("FIRETEAM_MAX_CONCURRENT", 3)
-    timeout_s = get_setting("FIRETEAM_TIMEOUT_SEC", 1800)
+    # Fallback matches project_settings.py DEFAULT_AGENT_SETTINGS; the prior
+    # 1800 was stale residue.
+    timeout_s = get_setting("FIRETEAM_TIMEOUT_SEC", 7200)
     sem = asyncio.Semaphore(max_concurrent)
 
     # ---- Observability: wave deploy header ----
@@ -693,21 +695,56 @@ async def fireteam_deploy_node(
 
     wave_start = time.monotonic()
     results: list = []
+    # Operator-confirmation waits do NOT consume the wave wall-clock. The
+    # per-member `await asyncio.wait_for(entry.event.wait(), ...)` is just
+    # another `await` from the event loop's perspective and would otherwise
+    # accumulate against this outer timer. The deadline-extension loop below
+    # polls get_credit_s and extends `deadline` by any new paused time.
+    from orchestrator_helpers.fireteam_confirmation_registry import (
+        get_credit_s as _get_credit_s,
+    )
     try:
-        raw = await asyncio.wait_for(
-            asyncio.gather(*tasks, return_exceptions=True),
-            timeout=timeout_s,
-        )
-        results = [
-            r if isinstance(r, dict) else _error_result(m, mid, r, time.monotonic() - wave_start)
-            for r, m, mid in zip(raw, members, member_ids)
-        ]
+        deadline = wave_start + timeout_s
+        last_credit = 0.0
+        pending = set(tasks)
+        while pending:
+            new_credit = _get_credit_s(session_id, fireteam_id_key) - last_credit
+            if new_credit > 0:
+                deadline += new_credit
+                last_credit += new_credit
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            # 1s poll cap so credit accrued mid-wait is applied promptly.
+            # asyncio.wait returns earlier whenever any task completes.
+            _, pending = await asyncio.wait(
+                pending,
+                timeout=min(remaining, 1.0),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        # All tasks finished before deadline. Match the previous
+        # `gather(..., return_exceptions=True)` shape: dict result if the
+        # task returned one, else wrap a raised exception into _error_result.
+        for t, m, mid in zip(tasks, members, member_ids):
+            try:
+                r = t.result()
+            except BaseException as exc:
+                results.append(_error_result(m, mid, exc, time.monotonic() - wave_start))
+                continue
+            if isinstance(r, dict):
+                results.append(r)
+            else:
+                results.append(_error_result(m, mid, r, time.monotonic() - wave_start))
     except asyncio.TimeoutError:
         logger.warning("[%s] fireteam %s timed out after %ds", session_id, fireteam_id_key, timeout_s)
         # Wake any members currently parked on the confirmation registry so
         # t.cancel() below doesn't race a forever-blocked asyncio.wait().
-        from orchestrator_helpers.fireteam_confirmation_registry import drop_wave as _drop_wave
+        from orchestrator_helpers.fireteam_confirmation_registry import (
+            drop_wave as _drop_wave,
+            drop_wave_credit as _drop_wave_credit,
+        )
         _drop_wave(session_id, fireteam_id_key, reason="wave_timeout")
+        _drop_wave_credit(session_id, fireteam_id_key)
         for t in tasks:
             if not t.done():
                 t.cancel()
@@ -774,8 +811,12 @@ async def fireteam_deploy_node(
                     logger.exception("timeout emit member_completed failed")
     except asyncio.CancelledError:
         logger.info("[%s] fireteam %s cancelled by operator", session_id, fireteam_id_key)
-        from orchestrator_helpers.fireteam_confirmation_registry import drop_wave as _drop_wave
+        from orchestrator_helpers.fireteam_confirmation_registry import (
+            drop_wave as _drop_wave,
+            drop_wave_credit as _drop_wave_credit,
+        )
         _drop_wave(session_id, fireteam_id_key, reason="wave_cancelled")
+        _drop_wave_credit(session_id, fireteam_id_key)
         for t in tasks:
             if not t.done():
                 t.cancel()
@@ -844,6 +885,13 @@ async def fireteam_deploy_node(
 
     wall = time.monotonic() - wave_start
     status_counts = _count_statuses(results)
+
+    # Normal-completion teardown for wave-clock credit tracking. The
+    # timeout / cancel branches do their own drop_wave_credit.
+    from orchestrator_helpers.fireteam_confirmation_registry import (
+        drop_wave_credit as _drop_wave_credit_final,
+    )
+    _drop_wave_credit_final(session_id, fireteam_id_key)
 
     # Overall fireteam status: timeout if any timeout, else completed.
     if status_counts.get("timeout", 0) > 0:

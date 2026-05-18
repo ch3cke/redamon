@@ -65,6 +65,8 @@ async def fireteam_await_confirmation_node(
     from orchestrator_helpers.fireteam_confirmation_registry import (
         register as _register,
         drop as _drop,
+        begin_confirmation_wait as _begin_wait,
+        end_confirmation_wait as _end_wait,
     )
 
     pending = state.get("_pending_confirmation") or {}
@@ -115,6 +117,11 @@ async def fireteam_await_confirmation_node(
         [t.get("tool_name") for t in (pending.get("tools") or [])],
     )
 
+    # Pause the wave wall-clock for the duration of this operator-wait. The
+    # deploy node's deadline loop reads get_credit_s and extends its deadline
+    # by the accumulated paused time. try/finally is load-bearing: an
+    # unbalanced count leaves the wave clock stuck-paused on cancel/timeout.
+    _begin_wait(session_id, wave_id)
     try:
         await asyncio.wait_for(entry.event.wait(), timeout=timeout_s)
         decision = entry.decision or "reject"
@@ -126,9 +133,11 @@ async def fireteam_await_confirmation_node(
         decision = "reject"
     except asyncio.CancelledError:
         # Wave cancelled mid-wait: propagate so the member task cleans up.
+        # _end_wait still fires via finally.
         _drop(session_id, wave_id, member_id)
         raise
     finally:
+        _end_wait(session_id, wave_id)
         _drop(session_id, wave_id, member_id)
 
     if decision == "approve":

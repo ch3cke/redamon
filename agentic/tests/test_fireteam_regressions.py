@@ -850,5 +850,149 @@ class FindingConversionPerItemExceptionRegression(unittest.TestCase):
         )
 
 
+# =============================================================================
+# BUG: Operator confirmation wait consumed the wave wall-clock budget.
+# =============================================================================
+#
+# The per-member `await asyncio.wait_for(entry.event.wait(), timeout=600)`
+# runs inside the wave's outer asyncio timer. From the event loop's
+# perspective, operator delay is a normal `await` that accumulates against
+# the wave timeout. A slow operator could exhaust the wave clock before any
+# tools ran (and silently auto-reject members on the way out).
+#
+# Fix: the confirmation registry tracks paused wall-clock per wave (with
+# interval-union semantics so parallel waits do not double-count). The
+# deploy node's manual deadline loop polls get_credit_s and extends its
+# deadline by any new credit, so operator delay no longer reduces the
+# budget available for tool execution.
+
+
+def _settings_for_credit_test():
+    """Short base timeout so the credit-extension is the deciding factor."""
+    return lambda k, d=None: {
+        "FIRETEAM_MAX_CONCURRENT": 3,
+        "FIRETEAM_MAX_MEMBERS": 8,
+        "FIRETEAM_TIMEOUT_SEC": 2,
+        "FIRETEAM_MEMBER_MAX_ITERATIONS": 10,
+    }.get(k, d)
+
+
+def _credit_simulating_graph_factory(*, simulated_wait_s: float):
+    """Member graph that simulates an operator-confirmation wait by directly
+    calling the registry's begin/end_confirmation_wait helpers, then
+    completes successfully. Without the fix the wave would time out at
+    FIRETEAM_TIMEOUT_SEC before this member ever yields its complete event."""
+    from orchestrator_helpers.fireteam_confirmation_registry import (
+        begin_confirmation_wait, end_confirmation_wait,
+    )
+
+    class _CreditGraph:
+        async def _run(self, s, config=None):
+            session_id = s.get("session_id") or ""
+            wave_id = s.get("fireteam_id") or ""
+            await asyncio.sleep(0.1)  # a touch of "work"
+            begin_confirmation_wait(session_id, wave_id)
+            try:
+                await asyncio.sleep(simulated_wait_s)
+            finally:
+                end_confirmation_wait(session_id, wave_id)
+            await asyncio.sleep(0.5)  # more "work" past base timeout
+            yield {
+                "fireteam_complete": {
+                    "task_complete": True,
+                    "completion_reason": "complete",
+                    "current_iteration": 1,
+                    "tokens_used": 5,
+                    "input_tokens_used": 4,
+                    "output_tokens_used": 1,
+                    "execution_trace": [],
+                    "target_info": {},
+                    "chain_findings_memory": [],
+                }
+            }
+
+        def astream(self, s, config=None):
+            return self._run(s, config)
+    return _CreditGraph()
+
+
+class WaveClockExcludesConfirmationWaitRegression(unittest.IsolatedAsyncioTestCase):
+    """Locks the fix: a long operator-confirmation wait does not consume the
+    wave wall-clock budget."""
+
+    async def test_long_confirmation_wait_extends_wave_deadline(self):
+        from orchestrator_helpers.nodes.fireteam_deploy_node import fireteam_deploy_node
+
+        patch_member_mock = AsyncMock()
+        with patch(
+            "orchestrator_helpers.nodes.fireteam_deploy_node._persist_deploy",
+            new=AsyncMock(return_value="id"),
+        ), patch(
+            "orchestrator_helpers.nodes.fireteam_deploy_node._patch_member",
+            new=patch_member_mock,
+        ), patch(
+            "orchestrator_helpers.nodes.fireteam_deploy_node._patch_fireteam",
+            new=AsyncMock(),
+        ), patch(
+            "orchestrator_helpers.nodes.fireteam_deploy_node.get_setting",
+            side_effect=_settings_for_credit_test(),
+        ):
+            t0 = _time.monotonic()
+            await fireteam_deploy_node(
+                _parent_state(n_members=1), None,
+                member_graph=_credit_simulating_graph_factory(simulated_wait_s=3.0),
+                streaming_callbacks={},
+                neo4j_creds=None,
+            )
+            wall = _time.monotonic() - t0
+            # Total wall ~= 0.1 + 3.0 + 0.5 = 3.6s. Base timeout was 2s; without
+            # the fix the wave would have timed out around 2s.
+            self.assertGreater(
+                wall, 3.0,
+                f"wave finished suspiciously fast ({wall:.2f}s) — confirmation "
+                f"wait may have been skipped",
+            )
+            self.assertLess(wall, 6.0, f"wave took too long: {wall:.2f}s")
+
+        self.assertGreater(len(patch_member_mock.call_args_list), 0)
+        last_body = patch_member_mock.call_args_list[-1].args[3]
+        self.assertEqual(
+            last_body["status"], "success",
+            f"member should have completed successfully (operator wait was "
+            f"credited back); got status={last_body.get('status')!r}, "
+            f"completionReason={last_body.get('completionReason')!r}",
+        )
+
+    def test_credit_accumulator_interval_union_semantics(self):
+        """Two parallel waits credit only their wall-clock overlap, not
+        their sum. Simple-sum would over-extend the deadline."""
+        from orchestrator_helpers.fireteam_confirmation_registry import (
+            begin_confirmation_wait, end_confirmation_wait,
+            get_credit_s, drop_wave_credit,
+        )
+
+        session_id = "test-session-iu"
+        wave_id = "test-wave-iu"
+        drop_wave_credit(session_id, wave_id)  # clean slate
+
+        begin_confirmation_wait(session_id, wave_id)
+        _time.sleep(0.2)
+        # Member B starts while A is still waiting (parallel).
+        begin_confirmation_wait(session_id, wave_id)
+        _time.sleep(0.2)
+        # A finishes; B still waiting (count 2->1, no commit yet).
+        end_confirmation_wait(session_id, wave_id)
+        _time.sleep(0.2)
+        # B finishes; count 1->0, commit total elapsed pause.
+        end_confirmation_wait(session_id, wave_id)
+
+        credit = get_credit_s(session_id, wave_id)
+        # Union wall-clock pause ~= 0.6s. Simple-sum would give ~0.8s.
+        self.assertGreater(credit, 0.5, f"credit too low: {credit:.3f}")
+        self.assertLess(credit, 0.75,
+                        f"credit too high (simple-sum bug?): {credit:.3f}")
+        drop_wave_credit(session_id, wave_id)
+
+
 if __name__ == "__main__":
     unittest.main()
