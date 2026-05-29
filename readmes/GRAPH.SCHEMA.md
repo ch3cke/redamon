@@ -481,7 +481,7 @@ FOR (c:Certificate) REQUIRE (c.subject_cn, c.user_id, c.project_id) IS UNIQUE;
 ---
 
 ### 8. Endpoint
-Specific web application endpoints (paths) discovered through Katana crawling, Hakrawler crawling, ParamSpider parameter mining, jsluice JavaScript analysis, or vulnerability scanning.
+Specific web application endpoints (paths) discovered through Katana crawling, Hakrawler crawling, ZAP Ajax Spider browser-driven crawling, ParamSpider parameter mining, jsluice JavaScript analysis, or vulnerability scanning.
 These are linked to their parent BaseURL and contain discovered parameters.
 
 ```cypher
@@ -544,7 +544,7 @@ FOR (e:Endpoint) REQUIRE (e.path, e.method, e.baseurl, e.user_id, e.project_id) 
 
 ### 8. Parameter
 URL parameters that represent potential attack vectors. These are discovered through Katana crawling,
-Hakrawler crawling, ParamSpider passive parameter mining, jsluice JavaScript analysis, and marked as injectable when vulnerabilities are found through DAST scanning.
+Hakrawler crawling, ZAP Ajax Spider browser-driven crawling, ParamSpider passive parameter mining, jsluice JavaScript analysis, and marked as injectable when vulnerabilities are found through DAST scanning.
 
 ```cypher
 (:Parameter {
@@ -1138,7 +1138,7 @@ to or what domains share certificates/hosting with the target.
 | Property | Type | Description |
 |----------|------|-------------|
 | `domain` | String | Foreign domain name (UNIQUE per tenant) |
-| `sources` | String[] | Discovery sources: http_probe_redirect, urlscan, gau, katana, hakrawler, jsluice, cert_discovery |
+| `sources` | String[] | Discovery sources: http_probe_redirect, urlscan, gau, katana, hakrawler, jsluice, zap_ajax_spider, cert_discovery |
 | `first_seen_at` | DateTime | When first encountered |
 | `redirect_from_urls` | String[] | In-scope URLs that redirected to this domain |
 | `redirect_to_urls` | String[] | The actual foreign URLs encountered |

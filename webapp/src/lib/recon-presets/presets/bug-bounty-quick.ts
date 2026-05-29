@@ -128,6 +128,9 @@ Bug bounty hunters triaging a new target. You want to know if there are quick wi
     hakrawlerEnabled: false,
     hakrawlerParallelism: 5,
 
+    // --- DISABLE ZAP Ajax Spider (browser crawl too slow for <15min budget) ---
+    zapAjaxSpiderEnabled: false,
+
     // --- DISABLE GAU & ParamSpider (archive lookups too slow) ---
     gauEnabled: false,
     gauWorkers: 10,

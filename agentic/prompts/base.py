@@ -1839,7 +1839,7 @@ When user asks about "AI SDKs in JS", "leaked AI keys", "AnythingLLM/Open WebUI/
 
 **ExternalDomain** - Foreign domains encountered during recon (out-of-scope, informational only)
 - domain (string): foreign domain name
-- sources (string[]): discovery sources (http_probe_redirect, urlscan, gau, katana, hakrawler, jsluice, cert_discovery, otx_passive_dns)
+- sources (string[]): discovery sources (http_probe_redirect, urlscan, gau, katana, hakrawler, zap_ajax_spider, jsluice, cert_discovery, otx_passive_dns)
 - redirect_from_urls (string[]): in-scope URLs that redirected to this domain
 - redirect_to_urls (string[]): foreign URLs encountered
 - status_codes_seen (string[]), titles_seen (string[]), servers_seen (string[])

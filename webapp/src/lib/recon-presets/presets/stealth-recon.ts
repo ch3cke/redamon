@@ -130,6 +130,9 @@ Red team operators performing authorized reconnaissance against targets with act
     // --- DISABLE Hakrawler ---
     hakrawlerEnabled: false,
 
+    // --- DISABLE ZAP Ajax Spider (browser crawling is loud and incompatible with Tor) ---
+    zapAjaxSpiderEnabled: false,
+
     // --- GAU: passive archive discovery, all providers ---
     gauEnabled: true,
     gauProviders: ['wayback', 'commoncrawl', 'otx', 'urlscan'],

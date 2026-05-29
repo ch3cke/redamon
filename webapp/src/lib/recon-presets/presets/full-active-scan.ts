@@ -154,7 +154,7 @@ Pentesters with full authorization on an engagement where stealth is irrelevant.
     zapAjaxSpiderMaxCrawlStates: 100,
     zapAjaxSpiderNumberOfBrowsers: 1,
     zapAjaxSpiderMaxUrls: 1000,
-    zapAjaxSpiderParallelism: 1,
+    zapAjaxSpiderParallelism: 3,
 
     // --- Hakrawler: deep aggressive crawl ---
     hakrawlerEnabled: true,

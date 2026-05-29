@@ -49,6 +49,7 @@ export const TOOL_WIKI: Record<string, { page: string; anchor?: string }> = {
 
   // Resource Enumeration
   Katana:             { page: 'Project-Settings-Reference', anchor: 'web-crawler-katana' },
+  ZapAjaxSpider:      { page: 'Project-Settings-Reference', anchor: 'web-crawler-zap-ajax-spider' },
   Hakrawler:          { page: 'Project-Settings-Reference', anchor: 'web-crawler-hakrawler' },
   Jsluice:            { page: 'Project-Settings-Reference', anchor: 'javascript-analysis-jsluice' },
   Ffuf:               { page: 'Project-Settings-Reference', anchor: 'directory-fuzzer-ffuf' },

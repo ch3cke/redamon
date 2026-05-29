@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.14.0] - 2026-05-29
+
+### Added
+
+- **ZAP Ajax Spider — browser-driven resource enumeration** ([recon/helpers/resource_enum/zap_ajax_spider_helpers.py](recon/helpers/resource_enum/zap_ajax_spider_helpers.py), [recon/main_recon_modules/resource_enum.py](recon/main_recon_modules/resource_enum.py), [recon/partial_recon_modules/web_crawling.py](recon/partial_recon_modules/web_crawling.py)) — new active crawler in GROUP 5 that runs OWASP ZAP with headless Firefox to capture endpoints static crawlers miss: JS-only XHRs, runtime-templated URLs, `history.pushState` SPA routes, click-cascade reveals, GraphQL POSTs, form submissions, and authenticated post-login surface via Replacer-injected headers. Off by default, auto-disabled in stealth mode, enabled in 4 presets (api-security, bug-bounty-deep, full-active-scan, web-app-pentester). 19 new project settings + Prisma columns. Validated end-to-end against guinea pig — all 13 expected discovery branches confirmed.
+
+- **`Endpoint.sources[]` array** ([graph_db/mixins/recon/resource_mixin.py](graph_db/mixins/recon/resource_mixin.py)) — every Endpoint now carries a fine-grained crawler-attribution list (`katana`, `hakrawler`, `zap_ajax_spider`, etc.) in addition to the existing singular `source` phase tag. Union-not-clobber merge on overlap preserves history when multiple crawlers find the same endpoint. Enables queries like `MATCH (e:Endpoint) WHERE 'zap_ajax_spider' IN e.sources`.
+
+### Fixed
+
+- **Partial-recon scope filter broken for IP-mode projects** ([recon/partial_recon_modules/helpers.py](recon/partial_recon_modules/helpers.py), [recon/partial_recon_modules/web_crawling.py](recon/partial_recon_modules/web_crawling.py)) — `_host_in_requested_domain_scope` blindly applied a domain-match filter against the synthetic `ip-targets.<project_id>` pseudo-domain, pruning every legitimate localhost / RFC1918 / IPv6-loopback BaseURL as "out of scope". The ZAP partial recon then fell back to bare `localhost` (no port) and wrote 4 garbage endpoints per run. Introduced a shared `_is_host_in_scope` helper that honors `IP_MODE` + `TARGET_IPS`, accepts CIDR membership and IPv6 (bracketed `[::1]:port` and bare `2001:db8::1`), and falls back to "any private/loopback IP" when no targets are configured. 34 new unit tests cover every branch.
+
+---
+
 ## [4.13.1] - 2026-05-28
 
 ### Fixed

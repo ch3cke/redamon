@@ -407,10 +407,10 @@ const ZapAjaxSpider = (
       ZAP Ajax Spider starts from <strong>BaseURL</strong> nodes by default, using the live URLs verified by HTTP Probing as browser crawl seeds.
     </p>
     <p style={paraStyle}>
-      When the project setting <span style={codeStyle}>base_urls_and_endpoints</span> is selected, existing <strong>Endpoint</strong> nodes are also reconstructed into full URLs and added as seeds. Custom URLs from the partial recon modal are appended to the same target set.
+      When endpoint seeding mode is enabled, existing <strong>Endpoint</strong> nodes are also reconstructed into full URLs and added as seeds. Custom URLs from the partial recon modal are appended to the same target set.
     </p>
     <p style={paraStyle}>
-      Header and cookie lines from the ZAP Ajax Spider settings are sent to ZAP for authenticated browser requests. They affect crawling behavior but are not surfaced in this workflow view.
+      Header and cookie lines configured in the ZAP Ajax Spider settings are sent with every browser request to support authenticated crawling. They affect crawling behavior but are not surfaced in this workflow view.
     </p>
 
     <div style={sectionTitleStyle}>How output transforms the graph</div>
@@ -418,7 +418,7 @@ const ZapAjaxSpider = (
       <li>Browser-discovered routes become <strong>Endpoint</strong> nodes through the existing resource enumeration graph conventions.</li>
       <li>Query strings and observed request inputs become <strong>Parameter</strong> nodes attached to their Endpoint.</li>
       <li>New in-scope origins become <strong>BaseURL</strong> nodes; out-of-scope hosts are represented as <strong>ExternalDomain</strong> nodes when graph storage rules allow it.</li>
-      <li>The raw endpoint source should be recorded as <span style={codeStyle}>zap_ajax_spider</span>, while storage relationships and deduplication stay unchanged from the rest of resource enumeration.</li>
+      <li>Each discovered Endpoint is tagged with the ZAP Ajax Spider as its discovery source, while storage relationships and deduplication stay unchanged from the rest of resource enumeration.</li>
     </ul>
 
     <div style={sectionTitleStyle}>When the scan refuses to start</div>

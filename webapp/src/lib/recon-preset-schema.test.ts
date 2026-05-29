@@ -466,6 +466,7 @@ describe('RECON_PARAMETER_CATALOG', () => {
       'Banner Grab',
       'Katana',
       'Hakrawler',
+      'ZAP Ajax Spider',
       'jsluice',
       'JS Recon',
       'GraphQL',

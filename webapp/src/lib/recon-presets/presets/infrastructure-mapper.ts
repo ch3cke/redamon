@@ -147,6 +147,7 @@ Network pentesters and infrastructure security teams mapping an external or inte
     // --- DISABLE all web crawlers ---
     katanaEnabled: false,
     hakrawlerEnabled: false,
+    zapAjaxSpiderEnabled: false,
 
     // --- DISABLE archive/passive URL discovery ---
     gauEnabled: false,

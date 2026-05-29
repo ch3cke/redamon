@@ -144,6 +144,7 @@ Red team operators running authorized engagements where some active probing is a
 
     // --- DISABLE Hakrawler ---
     hakrawlerEnabled: false,
+    zapAjaxSpiderEnabled: false,
 
     // --- GAU: passive archive discovery, all providers ---
     gauEnabled: true,

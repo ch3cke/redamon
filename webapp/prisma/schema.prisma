@@ -452,7 +452,7 @@ model Project {
   zapAjaxSpiderCustomHeaders     String[] @default([]) @map("zap_ajax_spider_custom_headers")
   zapAjaxSpiderExcludePatterns   String[] @default([]) @map("zap_ajax_spider_exclude_patterns")
   zapAjaxSpiderMaxUrls           Int      @default(1000) @map("zap_ajax_spider_max_urls")
-  zapAjaxSpiderParallelism       Int      @default(1) @map("zap_ajax_spider_parallelism")
+  zapAjaxSpiderParallelism       Int      @default(3) @map("zap_ajax_spider_parallelism")
 
   // ========== HAKRAWLER WEB CRAWLER ==========
   hakrawlerEnabled            Boolean  @default(true) @map("hakrawler_enabled")

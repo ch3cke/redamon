@@ -38,6 +38,130 @@ ENDPOINT_AI_CLASSIFIER_PORT = 9103
 # ai_provider/ai_finding_id.
 JS_RECON_AI_SDK_PORT = 9104
 
+# ZAP Ajax Spider showroom — exercises the browser-driven discovery paths
+# that static crawlers (Katana, Hakrawler) cannot reach. Every "endpoint"
+# on this port is discovered through a different runtime mechanism: JS-
+# only XHR, runtime-templated URL, history.pushState navigation, click-
+# cascade reveal, form submission, GraphQL POST, and an auth-gated branch
+# that only fires when ZAP injects an Authorization header via Replacer.
+# Logout-style links and static-asset noise are included to verify
+# logoutAvoidance and excludePatterns behaviour.
+ZAP_AJAX_SHOWROOM_PORT = 9105
+
+
+# ---------------------------------------------------------------------------
+# ZAP Ajax Spider showroom — what each discovery branch tests
+# ---------------------------------------------------------------------------
+# Each entry documents one endpoint, how ZAP would reach it via the
+# browser, and what static crawlers (Katana/Hakrawler) would miss.
+
+ZAP_AJAX_TEST_ENDPOINTS: list[dict] = [
+    {
+        "path": "/about",
+        "method": "GET",
+        "discovery": "Static <a href> in HTML",
+        "katana_finds": True,
+        "zap_finds": True,
+        "note": "Baseline. Both crawlers find it. Sanity check.",
+    },
+    {
+        "path": "/api/users/list",
+        "method": "GET",
+        "discovery": "fetch() in onclick handler",
+        "katana_finds": False,
+        "zap_finds": True,
+        "note": "URL only exists inside a JS function body. Browser must click the button.",
+    },
+    {
+        "path": "/api/projects/42",
+        "method": "GET",
+        "discovery": "Runtime-templated URL (`/api/projects/${id}`)",
+        "katana_finds": False,
+        "zap_finds": True,
+        "note": "Path constructed via template literal — id is computed at runtime.",
+    },
+    {
+        "path": "/spa/dashboard",
+        "method": "GET",
+        "discovery": "history.pushState route change",
+        "katana_finds": False,
+        "zap_finds": True,
+        "note": "SPA client-side navigation, no real HTTP request to /spa/dashboard.",
+    },
+    {
+        "path": "/api/dashboard-data",
+        "method": "GET",
+        "discovery": "fetch() after pushState",
+        "katana_finds": False,
+        "zap_finds": True,
+        "note": "Data XHR fired after the SPA route change.",
+    },
+    {
+        "path": "/api/secret-page",
+        "method": "GET",
+        "discovery": "Cascade — second button only appears after first click",
+        "katana_finds": False,
+        "zap_finds": True,
+        "note": "Tests that ZAP follows reveal chains, not just first-level elements.",
+    },
+    {
+        "path": "/graphql",
+        "method": "POST",
+        "discovery": "fetch with POST body from button onclick",
+        "katana_finds": False,
+        "zap_finds": True,
+        "note": "GraphQL POST — Katana doesn't generate POST traffic.",
+    },
+    {
+        "path": "/api/search",
+        "method": "GET",
+        "discovery": "form.onsubmit triggers fetch with query string",
+        "katana_finds": False,
+        "zap_finds": True,
+        "note": "Form discovery — exercises randomInputs path if enabled.",
+    },
+    {
+        "path": "/api/auth/logout",
+        "method": "GET",
+        "discovery": "<a href> with text 'Sign out'",
+        "katana_finds": True,
+        "zap_finds": False,  # When logoutAvoidance=true (default)
+        "note": "logoutAvoidance=true MUST skip this. Verifies session safety.",
+    },
+    {
+        "path": "/static/logo.png",
+        "method": "GET",
+        "discovery": "<img src> in HTML",
+        "katana_finds": True,
+        "zap_finds": True,  # Unless excluded via excludePatterns
+        "note": "Static asset noise. Filter via excludePatterns: \\.png$",
+    },
+    {
+        "path": "/api/me",
+        "method": "GET",
+        "discovery": "Auth-aware fetch on load (always called)",
+        "katana_finds": False,
+        "zap_finds": True,
+        "note": "Server returns header 'x-redamon-authed: true' when Authorization header is injected.",
+    },
+    {
+        "path": "/api/admin/users",
+        "method": "GET",
+        "discovery": "JS-injected <a> only rendered when /api/me reports authed",
+        "katana_finds": False,
+        "zap_finds": "auth-only",
+        "note": "Discoverable ONLY when ZAP injects Authorization header via Replacer. Exercises the customHeaders flow end-to-end.",
+    },
+    {
+        "path": "/api/admin/audit-log",
+        "method": "GET",
+        "discovery": "Cascade fetch after /api/me returned authed",
+        "katana_finds": False,
+        "zap_finds": "auth-only",
+        "note": "Auth-gated deep endpoint. Without Authorization header, ZAP never reaches it.",
+    },
+]
+
 
 # ---------------------------------------------------------------------------
 # Per-port listeners — exercise port_scan catalog + nmap version regex

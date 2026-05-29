@@ -43,6 +43,10 @@ describe('PARTIAL_RECON_SUPPORTED_TOOLS', () => {
     expect(PARTIAL_RECON_SUPPORTED_TOOLS.has('Hakrawler')).toBe(true)
   })
 
+  test('contains ZapAjaxSpider', () => {
+    expect(PARTIAL_RECON_SUPPORTED_TOOLS.has('ZapAjaxSpider')).toBe(true)
+  })
+
   test('contains Jsluice', () => {
     expect(PARTIAL_RECON_SUPPORTED_TOOLS.has('Jsluice')).toBe(true)
   })
@@ -127,6 +131,11 @@ describe('PARTIAL_RECON_PHASE_MAP', () => {
   test('has Hakrawler phases', () => {
     expect(PARTIAL_RECON_PHASE_MAP['Hakrawler']).toHaveLength(1)
     expect(PARTIAL_RECON_PHASE_MAP['Hakrawler'][0]).toBe('Resource Enumeration')
+  })
+
+  test('has ZapAjaxSpider phases', () => {
+    expect(PARTIAL_RECON_PHASE_MAP['ZapAjaxSpider']).toHaveLength(1)
+    expect(PARTIAL_RECON_PHASE_MAP['ZapAjaxSpider'][0]).toBe('Resource Enumeration')
   })
 
   test('has Jsluice phases', () => {
@@ -526,6 +535,44 @@ describe('PartialReconParams type shape', () => {
   test('Hakrawler params without user_targets (graph only)', () => {
     const params: PartialReconParams = {
       tool_id: 'Hakrawler',
+      graph_inputs: { domain: 'example.com' },
+      user_inputs: [],
+    }
+    expect(params.user_targets).toBeUndefined()
+  })
+
+  test('ZapAjaxSpider params with structured user_targets (URLs attached to BaseURL)', () => {
+    const params: PartialReconParams = {
+      tool_id: 'ZapAjaxSpider',
+      graph_inputs: { domain: 'example.com' },
+      user_inputs: [],
+      user_targets: {
+        subdomains: [], ips: [], ip_attach_to: null,
+        urls: ['https://app.example.com', 'https://api.example.com:8443'],
+        url_attach_to: 'https://app.example.com',
+      },
+    }
+    expect(params.tool_id).toBe('ZapAjaxSpider')
+    expect(params.user_targets?.urls).toHaveLength(2)
+    expect(params.user_targets?.url_attach_to).toBe('https://app.example.com')
+  })
+
+  test('ZapAjaxSpider params with generic URLs (no attach)', () => {
+    const params: PartialReconParams = {
+      tool_id: 'ZapAjaxSpider',
+      graph_inputs: { domain: 'example.com' },
+      user_inputs: [],
+      user_targets: {
+        subdomains: [], ips: [], ip_attach_to: null,
+        urls: ['https://example.com'], url_attach_to: null,
+      },
+    }
+    expect(params.user_targets?.url_attach_to).toBeNull()
+  })
+
+  test('ZapAjaxSpider params without user_targets (graph only)', () => {
+    const params: PartialReconParams = {
+      tool_id: 'ZapAjaxSpider',
       graph_inputs: { domain: 'example.com' },
       user_inputs: [],
     }

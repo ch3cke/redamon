@@ -90,6 +90,7 @@ Security teams auditing email spoofing defenses (SPF, DMARC, DKIM), DNS administ
     // --- Web Crawlers: ALL disabled ---
     katanaEnabled: false,
     hakrawlerEnabled: false,
+    zapAjaxSpiderEnabled: false,
 
     // --- Passive URL discovery: disabled ---
     gauEnabled: false,

@@ -21,7 +21,7 @@
 
 <p align="center">
   <a href="https://github.com/samugit83/redamon/stargazers"><img height="24" src="https://img.shields.io/github/stars/samugit83/redamon?style=flat&color=2E8B57&label=Stars" alt="GitHub Stars"/></a>
-  <img height="24" src="https://img.shields.io/badge/v4.13.1-release-2E8B57?style=flat" alt="Version 4.13.1"/>
+  <img height="24" src="https://img.shields.io/badge/v4.14.0-release-2E8B57?style=flat" alt="Version 4.14.0"/>
   <img height="24" src="https://img.shields.io/badge/WARNING-SECURITY%20TOOL-B22222?style=flat" alt="Security Tool Warning"/>
   <img height="24" src="https://img.shields.io/badge/LICENSE-MIT-4169A1?style=flat" alt="MIT License"/>
   <img height="24" src="https://img.shields.io/badge/END--TO--END-PIPELINE-A01025?style=flat" alt="End-to-End Pipeline"/>
@@ -427,6 +427,7 @@ Everything runs on a **fan-out / fan-in** architecture: each phase fires as many
 | | **Parameter Mining** | ParamSpider (Wayback CDX) | Passive | Parallel with crawlers |
 | | **JS Analysis** | jsluice | Active | Sequential (post-crawl) |
 | | **Directory Fuzzing** | FFuf | Active | Sequential (post-jsluice) |
+| | **Browser Crawling** | ZAP Ajax Spider | Active | Sequential (post-FFuf), per-seed Docker containers in parallel |
 | | **Parameter Discovery** | Arjun | Active / Passive | Methods parallel (GET/POST/JSON/XML) |
 | | **API Discovery** | Kiterunner | Active | Sequential per wordlist |
 | | **Endpoint AI Classifier** | Path + parameter classifier — tags `Endpoint.ai_interface_type` (`llm-chat`, `llm-completion`, `llm-embedding`, `llm-tool-call`, `sse-stream`, `mcp`, `llm-graphql`), `is_ai_rag_ingest`, `Parameter.is_ai_prompt_injectable` against catalogued AI signatures | Passive | Sequential (post-crawl) |

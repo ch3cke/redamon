@@ -97,6 +97,25 @@ class ResourceMixin:
                             # classifier toggle is off.
                             ai_interface_type = endpoint_info.get("ai_interface_type")
                             is_ai_rag_ingest = endpoint_info.get("is_ai_rag_ingest")
+
+                            # `source` (singular) is the high-level phase tag
+                            # ('resource_enum', 'vuln_scan', 'js_recon', etc.)
+                            # used by report queries to bucket by stage.
+                            # `sources` (plural) is the fine-grained tool list
+                            # ('katana', 'hakrawler', 'zap_ajax_spider', etc.)
+                            # set by each crawler's merge_X_into_by_base_url
+                            # helper. On overlap (multiple crawlers find the
+                            # same endpoint), we union the lists instead of
+                            # clobbering — preserves prior tool attribution.
+                            # Defensive normalisation: filter blanks/None and
+                            # dedup while preserving order, so a sloppy helper
+                            # output doesn't leak dupes into the graph on the
+                            # first MERGE (the Cypher CASE branch only dedups
+                            # against EXISTING sources on subsequent merges).
+                            ep_sources = list(dict.fromkeys(
+                                s for s in (endpoint_info.get("sources") or [])
+                                if s and isinstance(s, str)
+                            ))
                             session.run(
                                 """
                                 MERGE (e:Endpoint {path: $path, method: $method, baseurl: $baseurl, user_id: $user_id, project_id: $project_id})
@@ -109,6 +128,10 @@ class ResourceMixin:
                                     e.path_param_count = $path_count,
                                     e.urls_found = $urls_found,
                                     e.source = 'resource_enum',
+                                    e.sources = CASE
+                                        WHEN e.sources IS NULL THEN $sources
+                                        ELSE e.sources + [s IN $sources WHERE NOT s IN e.sources]
+                                    END,
                                     e.ai_interface_type = COALESCE($ai_interface_type, e.ai_interface_type),
                                     e.is_ai_rag_ingest = COALESCE($is_ai_rag_ingest, e.is_ai_rag_ingest),
                                     e.updated_at = datetime()
@@ -121,6 +144,7 @@ class ResourceMixin:
                                 body_count=param_count.get('body', 0),
                                 path_count=param_count.get('path', 0),
                                 urls_found=endpoint_info.get('urls_found', 1),
+                                sources=ep_sources,
                                 ai_interface_type=ai_interface_type,
                                 is_ai_rag_ingest=is_ai_rag_ingest,
                             )

@@ -7,7 +7,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from recon.partial_recon_modules.helpers import _is_valid_url, _is_valid_hostname, _should_include_root_domain
+from recon.partial_recon_modules.helpers import _is_valid_url, _is_valid_hostname, _should_include_root_domain, _is_host_in_scope
 from recon.partial_recon_modules.graph_builders import _build_http_probe_data_from_graph
 from recon.partial_recon_modules.user_inputs import _create_user_subdomains_in_graph
 from recon.helpers import build_target_urls, extract_targets_from_recon
@@ -616,14 +616,10 @@ def run_zap_ajax_spider_partial(config: dict) -> None:
     requested_domain = domain.strip(".").lower()
 
     def _host_in_requested_domain_scope(host: str) -> bool:
-        host = (host or "").strip(".").lower()
-        if not host:
-            return False
-        if ":" in host:
-            host = host.split(":", 1)[0]
-        if host == requested_domain:
-            return include_root_domain
-        return host.endswith(f".{requested_domain}")
+        # Delegates to the shared helper so IP-mode projects are handled
+        # consistently with the rest of the pipeline. The synthetic
+        # `ip-targets.<project_id>` pseudo-domain is bypassed in IP mode.
+        return _is_host_in_scope(host, settings, requested_domain, include_root_domain)
 
     def _url_in_requested_domain_scope(url: str, entry_host: str = "") -> bool:
         from urllib.parse import urlparse
@@ -662,6 +658,7 @@ def run_zap_ajax_spider_partial(config: dict) -> None:
             "http_probe": {
                 "by_url": {},
             },
+            "metadata": {"include_root_domain": include_root_domain},
         }
 
     # Inject user-provided URLs into the target list

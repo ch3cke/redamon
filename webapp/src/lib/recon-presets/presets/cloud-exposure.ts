@@ -137,6 +137,7 @@ Cloud security engineers, red teams targeting cloud-hosted organizations, and se
     // --- DISABLE web crawlers ---
     katanaEnabled: false,
     hakrawlerEnabled: false,
+    zapAjaxSpiderEnabled: false,
 
     // --- DISABLE archive/passive URL discovery ---
     gauEnabled: false,

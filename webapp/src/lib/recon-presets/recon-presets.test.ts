@@ -3596,6 +3596,60 @@ describe('GraphQL Security Scanner preset coverage', () => {
 })
 
 // ============================================================
+// ZAP Ajax Spider preset coverage
+// ============================================================
+
+describe('ZAP Ajax Spider preset coverage', () => {
+  const get = (id: string) => RECON_PRESETS.find(p => p.id === id)
+
+  // ZAP Ajax Spider enables when the preset's mission benefits from browser-driven
+  // crawling of JS-heavy / SPA / authenticated apps. It is heavy (10 min per seed)
+  // so it is deliberately OFF in quick, passive, stealth, OSINT, and JS-extraction presets.
+  const EXPECTED_ENABLED = [
+    'api-security', 'bug-bounty-deep', 'full-active-scan', 'web-app-pentester',
+  ]
+
+  // Every non-enabling preset must explicitly set zapAjaxSpiderEnabled: false (not omit it),
+  // because preset application is a shallow merge. Without explicit false, switching from a
+  // ZAP-enabled preset to one that merely omits the key leaves the toggle stuck ON.
+  const EXPLICITLY_DISABLED = [
+    'bug-bounty-quick', 'red-team-operator', 'stealth-recon',
+    'compliance-audit', 'cve-hunter',
+    'cloud-exposure', 'dns-email-security', 'full-passive-scan',
+    'full-maximum-scan',
+    'infrastructure-mapper', 'large-network', 'osint-investigator',
+    'subdomain-takeover', 'secret-hunter', 'secret-miner',
+    'directory-discovery', 'parameter-injection', 'graphql-recon',
+  ]
+
+  test.each(EXPECTED_ENABLED)('%s enables zapAjaxSpiderEnabled', (id) => {
+    const preset = get(id)
+    expect(preset).toBeDefined()
+    const p = preset!.parameters as Record<string, unknown>
+    expect(p.zapAjaxSpiderEnabled).toBe(true)
+  })
+
+  test.each(EXPLICITLY_DISABLED)('%s explicitly sets zapAjaxSpiderEnabled: false (for clean switching)', (id) => {
+    const preset = get(id)
+    expect(preset).toBeDefined()
+    const p = preset!.parameters as Record<string, unknown>
+    expect(p.zapAjaxSpiderEnabled).toBe(false)
+  })
+
+  test('switching from web-app-pentester to a disabled preset resets zapAjaxSpiderEnabled', () => {
+    const zapOn = RECON_PRESETS.find(p => p.id === 'web-app-pentester')!.parameters
+    const form = { name: 'test', ...zapOn } as Record<string, unknown>
+    expect(form.zapAjaxSpiderEnabled).toBe(true)
+
+    for (const id of EXPLICITLY_DISABLED) {
+      const disabledParams = RECON_PRESETS.find(p => p.id === id)!.parameters
+      const merged = { ...form, ...disabledParams } as Record<string, unknown>
+      expect(merged.zapAjaxSpiderEnabled).toBe(false)
+    }
+  })
+})
+
+// ============================================================
 // graphql-cop preset coverage (Phase 2 §17.7)
 // ============================================================
 

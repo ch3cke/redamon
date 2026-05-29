@@ -178,6 +178,59 @@ Serves an HTML index at `/` linking to **21 catalogued AI paths** plus **8 unamb
 
 The classifier reads existing Endpoint + Parameter nodes from the graph after Katana finishes — no probe traffic of its own. Required project settings: `katanaEnabled=true`, `resourceEnumAiClassifierEnabled=true` (default on).
 
+### Port 9105 — ZAP Ajax Spider showroom
+
+Serves a deliberately SPA-shaped page where every endpoint exists behind a
+different runtime discovery branch — none are reachable from static HTML
+alone. Lets you verify, end-to-end, that ZAP Ajax Spider can:
+
+- Click buttons that fire JS `fetch()` calls (`/api/users/list`)
+- Resolve runtime-templated URLs (`` `/api/projects/${id}` ``)
+- Follow `history.pushState` SPA route changes (`/spa/dashboard` → `/api/dashboard-data`)
+- Cascade-discover: click button A → reveals button B → B fetches `/api/secret-page`
+- POST to GraphQL (`/graphql`)
+- Submit forms with generated inputs (`/api/search?q=...`)
+- Honor `logoutAvoidance` — must NOT click `/api/auth/logout` (anchor text "Sign out")
+- Filter static-asset noise via `excludePatterns` (`/static/logo.png`)
+- Inject custom headers via Replacer — auth-gated endpoints (`/api/admin/users`,
+  `/api/admin/audit-log`) only appear when an `Authorization` header arrives
+
+| Endpoint                  | Method | How it's discovered                                       | Static crawlers (Katana/Hakrawler) | ZAP Ajax Spider |
+|---------------------------|--------|-----------------------------------------------------------|------------------------------------|-----------------|
+| `/about`                  | GET    | Plain `<a href>` anchor                                   | ✓                                  | ✓               |
+| `/api/users/list`         | GET    | `fetch()` inside button `onclick`                         | ✗                                  | ✓               |
+| `/api/projects/42`        | GET    | Template literal `` `/api/projects/${id}` ``              | ✗                                  | ✓               |
+| `/spa/dashboard`          | GET    | `history.pushState` route change                          | ✗                                  | ✓               |
+| `/api/dashboard-data`     | GET    | XHR after pushState                                       | ✗                                  | ✓               |
+| `/api/secret-page`        | GET    | Cascade — second button revealed after first click        | ✗                                  | ✓               |
+| `/graphql`                | POST   | `fetch` with POST body from onclick                       | ✗                                  | ✓               |
+| `/api/search`             | GET    | `form.onsubmit` triggers XHR with query string            | ✗                                  | ✓               |
+| `/api/auth/logout`        | GET    | `<a href>` with text "Sign out"                           | ✓                                  | ✗ (avoided)     |
+| `/static/logo.png`        | GET    | `<img src>` static asset                                  | ✓                                  | ✓ (filter it)   |
+| `/api/me`                 | GET    | Always fetched on load — returns `x-redamon-authed` header if `Authorization` was injected | ✗ | ✓ |
+| `/api/admin/users`        | GET    | JS-injected `<a>` rendered ONLY when `/api/me` reported authed | ✗                             | ✓ (auth-only)   |
+| `/api/admin/audit-log`    | GET    | Cascade fetch after `/api/me` returned authed             | ✗                                  | ✓ (auth-only)   |
+
+Manual smoke-check:
+```bash
+curl -s http://127.0.0.1:9105/ | head -20            # HTML index with buttons
+curl -s http://127.0.0.1:9105/api/me -i | grep -i x-redamon-authed   # → "false" (no Authorization)
+curl -s http://127.0.0.1:9105/api/me -H "Authorization: Bearer test" -i | grep -i x-redamon-authed  # → "true"
+curl -s http://127.0.0.1:9105/api/admin/users -H "Authorization: Bearer test"  # → JSON 200
+curl -s http://127.0.0.1:9105/api/admin/users -i | head -1            # → 403 without auth
+```
+
+End-to-end recon test:
+1. Create a RedAmon project, set target URL `http://127.0.0.1:9105`
+2. Run HTTP Probing — confirms the BaseURL node
+3. Enable ZAP Ajax Spider, leave seed mode = `base_urls`
+4. Run partial recon
+5. Open the graph — you should see Endpoints for every row in the table marked ✓ under "ZAP Ajax Spider"
+6. **Auth test**: paste `Authorization: Bearer testtoken` into the ZAP Custom Headers field, re-run
+7. The graph should now also contain `/api/me`, `/api/admin/users`, `/api/admin/audit-log` — endpoints invisible to the unauthenticated crawl
+
+Compare with Katana on the same target — it will find only `/about`, `/api/auth/logout`, and `/static/logo.png` (the three things visible in static HTML).
+
 ### Port 9104 — JS Recon AI SDK showroom (Lap-3 / Phase 6)
 
 Serves an HTML index at `/` whose `<head>` carries `<script src='/static/...'>` tags for **23 fixture JS files**. Katana follows the script tags; js_recon downloads each file; `match_ai_sdk()` in [recon/helpers/ai_signal_catalog.py](../../recon/helpers/ai_signal_catalog.py) scans the content and emits `JsReconFinding` nodes with `finding_type` ∈ `{ai-sdk-client, ai-sdk-key-literal, ai-sdk-browser-allowed, ai-frontend-detected, ai-provider-url}`. The Phase 6 mixin then enriches matching `Secret` nodes (from the legacy `JS_SECRET_PATTERNS` pass) with the `ai_provider` property.

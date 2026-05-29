@@ -141,7 +141,7 @@ Pentesters and security engineers testing REST APIs, GraphQL endpoints, or micro
     zapAjaxSpiderMaxCrawlStates: 100,
     zapAjaxSpiderNumberOfBrowsers: 1,
     zapAjaxSpiderMaxUrls: 1000,
-    zapAjaxSpiderParallelism: 1,
+    zapAjaxSpiderParallelism: 3,
 
     // --- DISABLE Hakrawler (Kiterunner handles API discovery) ---
     hakrawlerEnabled: false,

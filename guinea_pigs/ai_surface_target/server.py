@@ -33,6 +33,8 @@ from ai_signals import (
     RESOURCE_ENUM_AI_RAG_PATHS,
     TITLE_SHOWROOM_PORT,
     TITLE_VARIANTS,
+    ZAP_AJAX_SHOWROOM_PORT,
+    ZAP_AJAX_TEST_ENDPOINTS,
 )
 
 
@@ -434,6 +436,219 @@ def make_js_recon_ai_sdk_app() -> web.Application:
     return app
 
 
+def make_zap_ajax_showroom_app() -> web.Application:
+    """
+    SPA-like surface for testing ZAP Ajax Spider end-to-end.
+
+    The root HTML carries minimal static markup. The interactive surface is
+    built at runtime by inline JavaScript:
+    - JS-only XHR endpoints triggered by onclick handlers
+    - Runtime-templated URL (template literal with computed id)
+    - SPA route changes via history.pushState (no real HTTP for the route, but the
+      subsequent data fetch IS a real HTTP request)
+    - Click cascade: button A reveals button B; B's onclick fetches /api/secret-page
+    - GraphQL POST from a button
+    - Form submission via onsubmit
+    - Auth-aware flow: on load, fetch /api/me. If the server returns
+      `x-redamon-authed: true` (which it does only when an Authorization header
+      arrives via ZAP's Replacer), inject an admin link and fetch /api/admin/audit-log
+
+    Logout link and a static-asset img are included to verify:
+    - logoutAvoidance=true skips the /api/auth/logout anchor
+    - excludePatterns=[\\.png$] filters out the logo
+    """
+    app = web.Application()
+
+    INDEX_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>ZAP Ajax Spider Test Target</title>
+  <meta charset="utf-8" />
+  <style>
+    body { font-family: sans-serif; margin: 2em; }
+    button, a { display: inline-block; margin: 4px 8px 4px 0; }
+    #secret-area, #auth-area { margin-top: 1em; padding: 8px; border: 1px dashed #888; min-height: 24px; }
+    code { background: #eee; padding: 1px 4px; }
+  </style>
+</head>
+<body>
+  <h1>ZAP Ajax Spider Test Surface</h1>
+  <p>Every link/button below exercises a discovery branch that static
+  crawlers (Katana, Hakrawler) cannot reach without a real browser.</p>
+
+  <h2>Static (baseline)</h2>
+  <a href="/about">About (plain anchor — every crawler finds this)</a>
+  <br/>
+  <a id="logout-link" href="/api/auth/logout">Sign out (logoutAvoidance should SKIP this)</a>
+  <br/>
+  <img src="/static/logo.png" alt="logo" width="32" height="32" />
+  <span>&larr; static asset noise (filter via excludePatterns)</span>
+
+  <h2>JS-driven XHR</h2>
+  <button id="load-users" onclick="loadUsers()">Load Users</button>
+  <button id="reveal" onclick="revealSecret()">Show Secret Area</button>
+  <button id="goto-dashboard" onclick="gotoDashboard()">Dashboard (SPA route)</button>
+  <button id="graphql-btn" onclick="callGraphql()">Run GraphQL Query</button>
+
+  <h2>Form (test randomInputs)</h2>
+  <form id="search-form" onsubmit="return submitSearch(event)">
+    <input name="q" id="search-q" placeholder="search…" />
+    <button type="submit">Search</button>
+  </form>
+
+  <h2>Click-cascade reveal</h2>
+  <div id="secret-area"><em>(click "Show Secret Area" first)</em></div>
+
+  <h2>Auth-aware area (only populated when Authorization header is present)</h2>
+  <div id="auth-area"><em>(no auth detected yet)</em></div>
+
+  <script>
+    // 1. Plain XHR + runtime-templated URL — discoverable only via browser click
+    async function loadUsers() {
+      await fetch('/api/users/list');
+      const id = 42;
+      await fetch(`/api/projects/${id}`);
+    }
+
+    // 2. Cascade: reveal a second button, whose onclick fires another XHR
+    function revealSecret() {
+      const div = document.getElementById('secret-area');
+      div.innerHTML = '<button id="secret-btn" onclick="loadSecretPage()">Open Secret Page</button>';
+    }
+    async function loadSecretPage() {
+      await fetch('/api/secret-page');
+    }
+
+    // 3. SPA route change via history.pushState, followed by data fetch
+    async function gotoDashboard() {
+      history.pushState({}, '', '/spa/dashboard');
+      await fetch('/api/dashboard-data');
+    }
+
+    // 4. GraphQL POST
+    async function callGraphql() {
+      await fetch('/graphql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: '{ me { id email } }' })
+      });
+    }
+
+    // 5. Form submission triggers an XHR with query param
+    function submitSearch(e) {
+      e.preventDefault();
+      const q = document.getElementById('search-q').value || '';
+      fetch('/api/search?q=' + encodeURIComponent(q));
+      return false;
+    }
+
+    // 6. Auth-aware probe — runs on load. Server only returns the
+    // x-redamon-authed header when an Authorization request header was
+    // present (ZAP injects this via Replacer; a static crawler does not).
+    (async () => {
+      const r = await fetch('/api/me');
+      const authed = r.headers.get('x-redamon-authed') === 'true';
+      const area = document.getElementById('auth-area');
+      if (authed) {
+        area.innerHTML = '<a id="admin-link" href="/api/admin/users">Admin Users (auth-only)</a>';
+        await fetch('/api/admin/audit-log');
+      }
+    })();
+  </script>
+</body>
+</html>
+"""
+
+    async def index(_r: web.Request) -> web.Response:
+        return web.Response(text=INDEX_HTML, content_type="text/html")
+
+    async def about(_r: web.Request) -> web.Response:
+        return web.Response(text=_html("About — plain page"),
+                            content_type="text/html")
+
+    async def users_list(_r: web.Request) -> web.Response:
+        return web.json_response({"users": [{"id": 42, "name": "alice"}]})
+
+    async def project_by_id(request: web.Request) -> web.Response:
+        return web.json_response({
+            "project_id": request.match_info["pid"],
+            "items": [],
+        })
+
+    async def dashboard_data(_r: web.Request) -> web.Response:
+        return web.json_response({"widgets": []})
+
+    async def secret_page(_r: web.Request) -> web.Response:
+        return web.json_response({"secret": "discovered-via-cascade"})
+
+    async def graphql_endpoint(_r: web.Request) -> web.Response:
+        return web.json_response({"data": {"me": {"id": 1, "email": "stub@example.test"}}})
+
+    async def search(_r: web.Request) -> web.Response:
+        return web.json_response({"results": []})
+
+    async def auth_logout(_r: web.Request) -> web.Response:
+        # If ZAP follows this, the session would end. Returning 200 is fine for
+        # the guinea pig; the test is whether logoutAvoidance prevented the click.
+        return web.Response(text="logged out", content_type="text/plain")
+
+    async def me(request: web.Request) -> web.Response:
+        # Tell the JS whether the request carried an Authorization header.
+        # The JS uses this signal to decide whether to render the admin link.
+        # ZAP's Replacer injects Authorization on every request when
+        # zapAjaxSpiderCustomHeaders is configured.
+        has_auth = bool(request.headers.get("Authorization"))
+        headers = {"x-redamon-authed": "true" if has_auth else "false"}
+        return web.json_response(
+            {"user_id": 1 if has_auth else None},
+            headers=headers,
+        )
+
+    async def admin_users(request: web.Request) -> web.Response:
+        if not request.headers.get("Authorization"):
+            return web.Response(text="forbidden", status=403, content_type="text/plain")
+        return web.json_response({"users": [{"id": 1, "role": "admin"}]})
+
+    async def admin_audit_log(request: web.Request) -> web.Response:
+        if not request.headers.get("Authorization"):
+            return web.Response(text="forbidden", status=403, content_type="text/plain")
+        return web.json_response({"events": []})
+
+    async def logo_png(_r: web.Request) -> web.Response:
+        # Tiny 1x1 png stub. Hashed identical across runs.
+        png = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+            b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xfa\xcf"
+            b"\x00\x00\x00\x02\x00\x01\xe5'\xde\xfc\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        return web.Response(body=png, content_type="image/png")
+
+    async def favicon(_r: web.Request) -> web.Response:
+        return _empty_favicon()
+
+    async def healthz(_r: web.Request) -> web.Response:
+        return web.Response(text="ok", content_type="text/plain")
+
+    # Routes
+    app.router.add_get("/", index)
+    app.router.add_get("/about", about)
+    app.router.add_get("/api/users/list", users_list)
+    app.router.add_get("/api/projects/{pid}", project_by_id)
+    app.router.add_get("/api/dashboard-data", dashboard_data)
+    app.router.add_get("/api/secret-page", secret_page)
+    app.router.add_post("/graphql", graphql_endpoint)
+    app.router.add_get("/api/search", search)
+    app.router.add_get("/api/auth/logout", auth_logout)
+    app.router.add_get("/api/me", me)
+    app.router.add_get("/api/admin/users", admin_users)
+    app.router.add_get("/api/admin/audit-log", admin_audit_log)
+    app.router.add_get("/static/logo.png", logo_png)
+    app.router.add_get("/favicon.ico", favicon)
+    app.router.add_get("/healthz", healthz)
+    return app
+
+
 def make_jsluice_target_app() -> web.Application:
     app = web.Application()
 
@@ -555,6 +770,16 @@ async def main() -> None:
             JS_RECON_AI_SDK_PORT,
             f"js-recon-ai-sdk showroom — {len(JS_RECON_AI_SDK_FIXTURES)} "
             f"fixture JS files exercising match_ai_sdk() across all 5 channels",
+        )
+    )
+
+    # 7. ZAP Ajax Spider showroom — exercises browser-driven discovery
+    runners.append(
+        await _start_site(
+            make_zap_ajax_showroom_app(),
+            ZAP_AJAX_SHOWROOM_PORT,
+            f"zap-ajax-spider showroom — {len(ZAP_AJAX_TEST_ENDPOINTS)} "
+            f"discovery branches (XHR, pushState, cascade, GraphQL, auth-only)",
         )
     )
 

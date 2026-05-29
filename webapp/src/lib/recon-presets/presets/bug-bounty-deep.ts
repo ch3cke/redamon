@@ -137,7 +137,7 @@ Bug bounty hunters who have already triaged a target (perhaps with the Quick Win
     zapAjaxSpiderMaxCrawlStates: 100,
     zapAjaxSpiderNumberOfBrowsers: 1,
     zapAjaxSpiderMaxUrls: 1000,
-    zapAjaxSpiderParallelism: 1,
+    zapAjaxSpiderParallelism: 3,
 
     // --- Hakrawler: deep crawl ---
     hakrawlerEnabled: true,

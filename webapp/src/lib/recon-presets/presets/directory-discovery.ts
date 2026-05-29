@@ -122,6 +122,7 @@ Pentesters and bug bounty hunters in the early recon phase who want a complete m
 
     // --- Hakrawler: deep complementary crawl ---
     hakrawlerEnabled: true,
+    zapAjaxSpiderEnabled: false,
     hakrawlerDepth: 4,
     hakrawlerThreads: 10,
     hakrawlerTimeout: 60,

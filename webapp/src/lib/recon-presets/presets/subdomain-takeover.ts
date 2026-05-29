@@ -140,6 +140,7 @@ Discover every subdomain that exists and squeeze every possible takeover finding
     masscanEnabled: false,
     katanaEnabled: false,
     hakrawlerEnabled: false,
+    zapAjaxSpiderEnabled: false,
     paramspiderEnabled: false,
     jsluiceEnabled: false,
     jsReconEnabled: false,

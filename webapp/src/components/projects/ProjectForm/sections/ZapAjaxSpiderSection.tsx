@@ -115,7 +115,7 @@ export function ZapAjaxSpiderSection({ data, updateField, onRun }: ZapAjaxSpider
                     type="number"
                     className="textInput"
                     value={data.zapAjaxSpiderParallelism}
-                    onChange={(e) => updateField('zapAjaxSpiderParallelism', parseInt(e.target.value) || 1)}
+                    onChange={(e) => updateField('zapAjaxSpiderParallelism', parseInt(e.target.value) || 3)}
                     min={1}
                     max={10}
                   />
