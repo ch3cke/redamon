@@ -123,6 +123,17 @@ describe('reconPresetSchema', () => {
     expect(result.data!.ffufMatchCodes).toEqual([200, 301, 403])
   })
 
+  test('accepts JS Recon endpoint validation fields', () => {
+    const jsReconEndpointBlock = {
+      jsReconValidateEndpoints: true,
+      jsReconEndpointAcceptStatus: [200, 204, 301, 403],
+      jsReconEndpointCustomHeaders: ['Authorization: Bearer token', 'X-Test: true'],
+    }
+    const result = reconPresetSchema.safeParse(jsReconEndpointBlock)
+    expect(result.success).toBe(true)
+    expect(result.data).toEqual(jsReconEndpointBlock)
+  })
+
   test('accepts float field (cveLookupMinCvss)', () => {
     const result = reconPresetSchema.safeParse({
       cveLookupMinCvss: 7.5,
@@ -241,6 +252,14 @@ describe('reconPresetSchema coercion', () => {
     expect(result.data!.ffufMatchCodes).toEqual([200, 301, 403])
   })
 
+  test('coerces stringified JS Recon endpoint status codes', () => {
+    const result = reconPresetSchema.safeParse({
+      jsReconEndpointAcceptStatus: ['200', '301', '403'],
+    })
+    expect(result.success).toBe(true)
+    expect(result.data!.jsReconEndpointAcceptStatus).toEqual([200, 301, 403])
+  })
+
   test('coerces stringified float', () => {
     const result = reconPresetSchema.safeParse({
       cveLookupMinCvss: '7.5',
@@ -316,6 +335,13 @@ describe('reconPresetSchema type rejection', () => {
   test('rejects mixed-type array for string array field', () => {
     const result = reconPresetSchema.safeParse({
       nucleiSeverity: ['critical', true, 42],
+    })
+    expect(result.success).toBe(false)
+  })
+
+  test('rejects non-integer JS Recon endpoint status codes', () => {
+    const result = reconPresetSchema.safeParse({
+      jsReconEndpointAcceptStatus: [200, 200.5],
     })
     expect(result.success).toBe(false)
   })

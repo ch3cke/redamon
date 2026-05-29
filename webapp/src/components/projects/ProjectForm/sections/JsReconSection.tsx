@@ -251,6 +251,8 @@ The example above is ready to copy-paste into a .json file.`,
   },
 ]
 
+const DEFAULT_ENDPOINT_ACCEPT_STATUS = [200, 201, 204, 301, 302, 307, 308, 401, 403, 405]
+
 interface JsReconSectionProps {
   data: FormData
   updateField: <K extends keyof FormData>(field: K, value: FormData[K]) => void
@@ -572,6 +574,55 @@ export function JsReconSection({ data, updateField, projectId, mode, onRun }: Js
                     onChange={(checked) => updateField('jsReconExtractEndpoints' as any, checked)}
                   />
                 </div>
+                <div className={styles.toggleRow}>
+                  <div>
+                    <span className={styles.toggleLabel}>Validate Extracted Endpoints</span>
+                    <p className={styles.toggleDescription}>Probe endpoints extracted from JS before graph write. Headers below apply only to endpoint probes.</p>
+                  </div>
+                  <Toggle
+                    checked={(data as any).jsReconValidateEndpoints ?? true}
+                    onChange={(checked) => updateField('jsReconValidateEndpoints' as any, checked)}
+                  />
+                </div>
+                {((data as any).jsReconValidateEndpoints ?? true) && (
+                  <div className={styles.fieldRow}>
+                    <div className={styles.fieldGroup}>
+                      <label className={styles.fieldLabel}>Accepted Status Codes</label>
+                      <input
+                        type="text"
+                        className="textInput"
+                        value={((data as any).jsReconEndpointAcceptStatus ?? DEFAULT_ENDPOINT_ACCEPT_STATUS).join(', ')}
+                        onChange={(e) => updateField(
+                          'jsReconEndpointAcceptStatus' as any,
+                          e.target.value
+                            .split(',')
+                            .map((value) => value.trim())
+                            .filter(Boolean)
+                            .map((value) => Number(value))
+                            .filter(Number.isFinite) as any,
+                        )}
+                      />
+                      <span className={styles.fieldHint}>Comma-separated HTTP status codes accepted as live endpoints</span>
+                    </div>
+                    <div className={styles.fieldGroup}>
+                      <label className={styles.fieldLabel}>Endpoint Validation Headers</label>
+                      <textarea
+                        className="textInput"
+                        rows={4}
+                        value={((data as any).jsReconEndpointCustomHeaders ?? []).join('\n')}
+                        onChange={(e) => updateField(
+                          'jsReconEndpointCustomHeaders' as any,
+                          e.target.value
+                            .split('\n')
+                            .map((line) => line.trim())
+                            .filter(Boolean) as any,
+                        )}
+                        placeholder={`Cookie: session=...\nAuthorization: Bearer ...`}
+                      />
+                      <span className={styles.fieldHint}>One header per line for endpoint validation probes</span>
+                    </div>
+                  </div>
+                )}
                 <div className={styles.toggleRow}>
                   <div>
                     <span className={styles.toggleLabel}>DOM Sink Detection</span>

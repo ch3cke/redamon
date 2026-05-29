@@ -166,15 +166,37 @@ class JsReconMixin:
                     return False
                 if rel_type not in ('HAS_JS_FINDING', 'HAS_SECRET', 'HAS_ENDPOINT'):
                     return False
-                session.run(
+                result = session.run(
                     f"""
                     MATCH (file:JsReconFinding {{id: $fid, finding_type: 'js_file'}})
                     MATCH (n:{node_label} {{id: $nid}})
-                    MERGE (file)-[:{rel_type}]->(n)
+                    MERGE (file)-[r:{rel_type}]->(n)
+                    RETURN count(r) AS linked
                     """,
                     fid=file_node_id, nid=node_id
                 )
-                return True
+                record = result.single()
+                linked = record.get("linked", 0) if record else 0
+                return int(linked) > 0
+
+            def _link_endpoint_to_file(session, source_url: str, path: str, method: str, baseurl: str) -> bool:
+                """Link a JS file to an Endpoint using the Endpoint canonical identity."""
+                file_node_id = file_node_ids.get(source_url)
+                if not file_node_id:
+                    return False
+                result = session.run(
+                    """
+                    MATCH (file:JsReconFinding {id: $fid, finding_type: 'js_file'})
+                    MATCH (n:Endpoint {path: $path, method: $method, baseurl: $baseurl, user_id: $uid, project_id: $pid})
+                    MERGE (file)-[r:HAS_ENDPOINT]->(n)
+                    RETURN count(r) AS linked
+                    """,
+                    fid=file_node_id, path=path, method=method, baseurl=baseurl,
+                    uid=user_id, pid=project_id,
+                )
+                record = result.single()
+                linked = record.get("linked", 0) if record else 0
+                return int(linked) > 0
 
             # --- 1. JsReconFinding nodes (non-secret findings) ---
             finding_types = [
@@ -549,6 +571,9 @@ class JsReconMixin:
             created_endpoints = set()
             for ep in js_recon_data.get("endpoints", []):
                 try:
+                    if ep.get("validation_status") != "hittable":
+                        continue
+
                     path = ep.get("path", "")
                     method = ep.get("method", "GET")
                     source_js = ep.get("source_js", "")
@@ -569,29 +594,49 @@ class JsReconMixin:
                     created_endpoints.add(ep_key)
 
                     effective_baseurl = base_url or 'upload'
+                    id_hash = hashlib.sha256(f"{effective_baseurl}:{method}:{path}".encode()).hexdigest()[:16]
+                    node_id = f"endpoint-{user_id}-{project_id}-js-{id_hash}"
 
-                    session.run(
+                    result = session.run(
                         """
                         MERGE (e:Endpoint {path: $path, method: $method, baseurl: $baseurl, user_id: $uid, project_id: $pid})
-                        ON CREATE SET e.source = 'js_recon',
+                        ON CREATE SET e.id = COALESCE(e.id, $id),
+                            e.source = 'js_recon',
                             e.category = $category,
                             e.full_url = $full_url,
+                            e.status_code = $status_code,
+                            e.resolved_url = $resolved_url,
+                            e.validation_status = $validation_status,
                             e.endpoint_type = $ep_type,
+                            e._js_recon_created = true,
                             e.updated_at = datetime()
-                        ON MATCH SET e.js_recon_source = true,
+                        ON MATCH SET e.id = COALESCE(e.id, $id),
+                            e.js_recon_source = true,
                             e.endpoint_type = COALESCE(e.endpoint_type, $ep_type),
                             e.full_url = COALESCE(e.full_url, $full_url),
+                            e.status_code = COALESCE($status_code, e.status_code),
+                            e.resolved_url = CASE WHEN $resolved_url <> '' THEN $resolved_url ELSE e.resolved_url END,
+                            e.validation_status = COALESCE($validation_status, e.validation_status),
                             e.updated_at = datetime()
+                        WITH e, COALESCE(e._js_recon_created, false) AS created
+                        REMOVE e._js_recon_created
+                        RETURN created AS created
                         """,
                         path=path, method=method, baseurl=effective_baseurl,
                         uid=user_id, pid=project_id,
+                        id=node_id,
                         category=ep.get("category", "endpoint"),
                         full_url=ep.get("full_url", ""),
+                        status_code=ep.get("status_code"),
+                        resolved_url=ep.get("resolved_url", ""),
+                        validation_status=ep.get("validation_status"),
                         ep_type=ep.get("type", "rest"),
                     )
-                    stats["endpoints_created"] += 1
+                    record = result.single()
+                    if record and bool(record.get("created", False)):
+                        stats["endpoints_created"] += 1
 
-                    if _link_to_file(session, node_id, 'Endpoint', 'HAS_ENDPOINT', source_js):
+                    if _link_endpoint_to_file(session, source_js, path, method, effective_baseurl):
                         stats["relationships_created"] += 1
 
                 except Exception as e:

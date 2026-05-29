@@ -157,6 +157,7 @@ export async function POST(request: NextRequest) {
       'nucleiTags', 'nucleiExcludeTags',
       'httpxPaths', 'httpxCustomHeaders', 'httpxMatchCodes', 'httpxFilterCodes',
       'katanaExcludePatterns', 'katanaCustomHeaders',
+      'jsReconEndpointCustomHeaders',
       'gauProviders', 'gauBlacklistExtensions', 'gauYearRange',
       'kiterunnerWordlists', 'kiterunnerHeaders', 'kiterunnerBruteforceMethods',
       'roeExcludedHosts', 'roeExcludedHostReasons', 'roeTimeWindowDays',
@@ -170,6 +171,7 @@ export async function POST(request: NextRequest) {
     }
     // Int[] fields: ensure elements are numbers, not strings
     const INT_ARRAY_FIELDS = [
+      'jsReconEndpointAcceptStatus',
       'gauVerifyAcceptStatus', 'kiterunnerIgnoreStatus', 'kiterunnerMatchStatus',
     ]
     for (const key of INT_ARRAY_FIELDS) {

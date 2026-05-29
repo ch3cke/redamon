@@ -20,7 +20,7 @@ import hashlib
 import requests
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from typing import Optional
 
 from recon.helpers.js_recon.patterns import (
@@ -64,6 +64,93 @@ _SKIP_PATTERNS = [
 
 # Max file size for download (5MB)
 _MAX_JS_FILE_SIZE = 5 * 1024 * 1024
+
+
+def _parse_endpoint_validation_headers(header_lines: list) -> dict:
+    """Parse user-provided endpoint validation headers."""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (compatible; RedAmon-JsRecon/1.0)',
+    }
+
+    for line in header_lines:
+        if not isinstance(line, str):
+            continue
+
+        line = line.strip()
+        if not line or ':' not in line:
+            continue
+
+        name, value = line.split(':', 1)
+        name = name.strip()
+        value = value.strip()
+        if not name or not value:
+            continue
+
+        headers[name] = value
+
+    return headers
+
+
+def _resolve_endpoint_candidate_url(endpoint: dict) -> str:
+    """Resolve an endpoint candidate to an absolute URL suitable for validation."""
+    candidate = endpoint.get('full_url') or endpoint.get('path') or ''
+    if not isinstance(candidate, str):
+        return ''
+
+    candidate = candidate.strip()
+    if not candidate:
+        return ''
+
+    if candidate.startswith(('http://', 'https://')):
+        return candidate
+
+    source_js = endpoint.get('source_js') or ''
+    source_scheme = ''
+    if isinstance(source_js, str) and source_js:
+        source_scheme = urlparse(source_js).scheme
+
+    if candidate.startswith('//'):
+        scheme = source_scheme if source_scheme in ('http', 'https') else 'https'
+        return f'{scheme}:{candidate}'
+
+    if not isinstance(source_js, str) or urlparse(source_js).scheme not in ('http', 'https'):
+        return ''
+
+    return urljoin(source_js, candidate)
+
+
+def _url_origin(url: str) -> str:
+    """Return a normalized URL origin, or an empty string when unavailable."""
+    if not isinstance(url, str):
+        return ''
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme in ('http', 'https') and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}".lower()
+    except Exception:
+        pass
+    return ''
+
+
+def _endpoint_probe_method(extracted_method: str) -> str:
+    """Choose a non-mutating method for endpoint validation probes."""
+    method = extracted_method.upper() if isinstance(extracted_method, str) else 'GET'
+    if method in ('HEAD', 'OPTIONS'):
+        return method
+    if method == 'GET':
+        return 'GET'
+    return 'OPTIONS'
+
+
+def _endpoint_probe_headers(endpoint: dict, resolved_url: str, custom_header_lines: list) -> dict:
+    """Use custom validation headers only for same-origin endpoint probes."""
+    default_headers = _parse_endpoint_validation_headers([])
+    custom_headers = _parse_endpoint_validation_headers(custom_header_lines)
+    source_origin = _url_origin(endpoint.get('source_js', ''))
+    target_origin = _url_origin(resolved_url)
+    if source_origin and source_origin == target_origin:
+        return custom_headers
+    return default_headers
 
 
 def _is_js_url(url: str) -> bool:
@@ -538,6 +625,104 @@ def _validate_secrets(secrets: list, settings: dict) -> list:
     return secrets
 
 
+def _validate_extracted_endpoints(endpoints: list, settings: dict, request_func=None) -> list:
+    """Validate extracted endpoints with lightweight non-following HTTP probes."""
+    if not settings.get('JS_RECON_VALIDATE_ENDPOINTS', True):
+        for endpoint in endpoints:
+            endpoint['validation_status'] = 'unvalidated'
+            endpoint['validation_error'] = 'validation_disabled'
+        return endpoints
+
+    def _clamp_int(value, default: int, minimum: int, maximum: int) -> int:
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(value, maximum))
+
+    def _configured_status_codes(value) -> set:
+        default_codes = [200, 201, 204, 301, 302, 307, 308, 401, 403, 405]
+        if value is None:
+            value = default_codes
+        elif isinstance(value, str):
+            value = re.split(r'[\s,]+', value)
+
+        codes = set()
+        try:
+            iterator = iter(value)
+        except TypeError:
+            iterator = iter([value])
+
+        for code in iterator:
+            try:
+                codes.add(int(code))
+            except (TypeError, ValueError):
+                continue
+
+        return codes or set(default_codes)
+
+    accepted_statuses = _configured_status_codes(
+        settings.get('JS_RECON_ENDPOINT_ACCEPT_STATUS')
+    )
+    custom_header_lines = settings.get('JS_RECON_ENDPOINT_CUSTOM_HEADERS', [])
+    timeout = _clamp_int(settings.get('JS_RECON_VALIDATION_TIMEOUT', 5), 5, 1, 30)
+    workers = _clamp_int(settings.get('JS_RECON_CONCURRENCY', 10), 10, 1, 20)
+    requester = request_func or requests.request
+
+    def _validate_one(endpoint: dict) -> None:
+        candidate = endpoint.get('full_url') or endpoint.get('path') or ''
+        if isinstance(candidate, str) and candidate.strip().lower().startswith(('ws://', 'wss://')):
+            endpoint['validation_status'] = 'unvalidated'
+            endpoint['validation_error'] = 'unsupported_scheme'
+            return
+
+        method = endpoint.get('method') or 'GET'
+        if not isinstance(method, str):
+            method = 'GET'
+        method = method.upper()
+        if endpoint.get('type') == 'websocket' or method in ('WS', 'WSS'):
+            endpoint['validation_status'] = 'unvalidated'
+            endpoint['validation_error'] = 'unsupported_scheme'
+            return
+
+        resolved_url = _resolve_endpoint_candidate_url(endpoint)
+        if not resolved_url:
+            endpoint['validation_status'] = 'unvalidated'
+            endpoint['validation_error'] = 'unresolved_url'
+            return
+
+        endpoint['resolved_url'] = resolved_url
+        probe_method = _endpoint_probe_method(method)
+        headers = _endpoint_probe_headers(endpoint, resolved_url, custom_header_lines)
+
+        try:
+            response = requester(
+                probe_method,
+                resolved_url,
+                timeout=timeout,
+                headers=headers,
+                allow_redirects=False,
+            )
+            status_code = int(getattr(response, 'status_code', 0))
+            endpoint['status_code'] = status_code
+            endpoint['validation_status'] = (
+                'hittable' if status_code in accepted_statuses else 'not_hittable'
+            )
+            endpoint['validation_error'] = ''
+        except requests.Timeout:
+            endpoint['validation_status'] = 'not_hittable'
+            endpoint['validation_error'] = 'timeout'
+        except Exception as exc:
+            endpoint['validation_status'] = 'not_hittable'
+            endpoint['validation_error'] = type(exc).__name__
+
+    if endpoints:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            list(ex.map(_validate_one, endpoints))
+
+    return endpoints
+
+
 def _extract_subdomains(
     endpoints: list,
     root_domain: str,
@@ -607,11 +792,18 @@ def _build_summary(results: dict) -> dict:
             validated['unvalidated'] += 1
 
     filtered_stats = results.get('_filtered_stats', {})
+    endpoint_validation = {'hittable': 0, 'not_hittable': 0, 'unvalidated': 0}
+
+    for endpoint in results.get('endpoints', []):
+        vstatus = endpoint.get('validation_status', 'unvalidated')
+        endpoint_validation[vstatus] = endpoint_validation.get(vstatus, 0) + 1
 
     return {
         'secrets_by_severity': severity_counts,
         'secrets_by_type': type_counts,
         'validated_keys': validated,
+        'endpoint_validation': endpoint_validation,
+        'endpoints_hittable': endpoint_validation.get('hittable', 0),
         'false_positives_filtered': filtered_stats,
         'false_positives_filtered_total': sum(filtered_stats.values()),
         'dependency_confusion_count': len(results.get('dependencies', [])),
@@ -688,6 +880,9 @@ def run_js_recon(combined_result: dict, settings: dict) -> dict:
             ("JS_RECON_CUSTOM_FRAMEWORKS", "Filtering"),
             ("JS_RECON_VALIDATE_KEYS", "Validation"),
             ("JS_RECON_VALIDATION_TIMEOUT", "Validation"),
+            ("JS_RECON_VALIDATE_ENDPOINTS", "Endpoint validation"),
+            ("JS_RECON_ENDPOINT_ACCEPT_STATUS", "Endpoint validation"),
+            ("JS_RECON_ENDPOINT_CUSTOM_HEADERS", "Endpoint validation"),
             ("JS_RECON_AI_SDK_DETECTION_ENABLED", "AI surface"),
         ],
     )
@@ -741,6 +936,16 @@ def run_js_recon(combined_result: dict, settings: dict) -> dict:
         if results.get('secrets'):
             print(f"[*][JsRecon] Validating {len(results['secrets'])} discovered secrets...")
             results['secrets'] = _validate_secrets(results['secrets'], settings)
+
+        # 6. Validate endpoints
+        if results.get('endpoints'):
+            print(f"[*][JsRecon] Validating {len(results['endpoints'])} discovered endpoints...")
+            results['endpoints'] = _validate_extracted_endpoints(results['endpoints'], settings)
+            hittable_count = sum(
+                1 for endpoint in results['endpoints']
+                if endpoint.get('validation_status') == 'hittable'
+            )
+            print(f"[+][JsRecon] Endpoint validation: {hittable_count} hittable")
 
         # 6. Subdomain feedback loop
         root_domain = combined_result.get('domain', '')

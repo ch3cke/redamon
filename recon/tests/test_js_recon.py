@@ -32,6 +32,8 @@ sourcemap = _load_module('recon.helpers.js_recon.sourcemap', os.path.join(BASE, 
 dependency = _load_module('recon.helpers.js_recon.dependency', os.path.join(BASE, 'helpers/js_recon/dependency.py'))
 endpoints_mod = _load_module('recon.helpers.js_recon.endpoints', os.path.join(BASE, 'helpers/js_recon/endpoints.py'))
 framework = _load_module('recon.helpers.js_recon.framework', os.path.join(BASE, 'helpers/js_recon/framework.py'))
+ai_signal_catalog = _load_module('recon.helpers.ai_signal_catalog', os.path.join(BASE, 'helpers/ai_signal_catalog.py'))
+js_recon = _load_module('recon.main_recon_modules.js_recon', os.path.join(BASE, 'main_recon_modules/js_recon.py'))
 
 
 def _scan(js, url='test.js', **kwargs):
@@ -862,6 +864,203 @@ class TestEndpoints(unittest.TestCase):
 
     def test_disabled(self):
         self.assertEqual(endpoints_mod.extract_endpoints([], {'JS_RECON_EXTRACT_ENDPOINTS': False}), [])
+
+
+class TestEndpointValidationHelpers(unittest.TestCase):
+
+    def test_parse_endpoint_validation_headers_accepts_auth_and_cookie(self):
+        headers = js_recon._parse_endpoint_validation_headers([
+            'Cookie: session=abc123',
+            'Authorization: Bearer token',
+            '',
+            'malformed',
+            object(),
+            'X-Blank:   ',
+        ])
+
+        self.assertEqual(headers['Cookie'], 'session=abc123')
+        self.assertEqual(headers['Authorization'], 'Bearer token')
+        self.assertEqual(headers['User-Agent'], 'Mozilla/5.0 (compatible; RedAmon-JsRecon/1.0)')
+        self.assertNotIn('X-Blank', headers)
+        self.assertNotIn('malformed', headers)
+
+    def test_resolve_endpoint_candidate_url_resolves_relative_from_source_js(self):
+        url = js_recon._resolve_endpoint_candidate_url({
+            'path': '/api/users',
+            'source_js': 'https://app.example.com/static/main.js',
+        })
+
+        self.assertEqual(url, 'https://app.example.com/api/users')
+
+    def test_resolve_endpoint_candidate_url_preserves_absolute_full_url(self):
+        url = js_recon._resolve_endpoint_candidate_url({
+            'full_url': 'https://api.example.com/v1/users',
+            'source_js': 'https://app.example.com/static/main.js',
+        })
+
+        self.assertEqual(url, 'https://api.example.com/v1/users')
+
+    def test_resolve_endpoint_candidate_url_returns_empty_for_uploaded_relative(self):
+        url = js_recon._resolve_endpoint_candidate_url({
+            'path': '/api/users',
+            'source_js': 'upload://bundle.js',
+        })
+
+        self.assertEqual(url, '')
+
+    def test_validate_extracted_endpoints_marks_accepted_status_hittable(self):
+        calls = []
+
+        class Response:
+            status_code = 403
+
+        def request_func(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return Response()
+
+        endpoints = [{
+            'path': '/admin',
+            'source_js': 'https://app.example.com/static/main.js',
+            'method': 'post',
+        }]
+
+        validated = js_recon._validate_extracted_endpoints(endpoints, {
+            'JS_RECON_VALIDATE_ENDPOINTS': True,
+            'JS_RECON_ENDPOINT_CUSTOM_HEADERS': ['Cookie: session=abc123'],
+        }, request_func=request_func)
+
+        self.assertIs(validated, endpoints)
+        self.assertEqual(validated[0]['validation_status'], 'hittable')
+        self.assertEqual(validated[0]['status_code'], 403)
+        self.assertEqual(validated[0]['resolved_url'], 'https://app.example.com/admin')
+        self.assertEqual(validated[0]['validation_error'], '')
+        self.assertEqual(calls[0][0], 'OPTIONS')
+        self.assertEqual(calls[0][1], 'https://app.example.com/admin')
+        self.assertEqual(calls[0][2]['headers']['Cookie'], 'session=abc123')
+        self.assertFalse(calls[0][2]['allow_redirects'])
+
+    def test_validate_extracted_endpoints_does_not_replay_mutating_methods(self):
+        calls = []
+
+        class Response:
+            status_code = 204
+
+        endpoints = [{
+            'path': '/api/user/123',
+            'source_js': 'https://app.example.com/static/main.js',
+            'method': 'DELETE',
+        }]
+
+        validated = js_recon._validate_extracted_endpoints(
+            endpoints,
+            {'JS_RECON_VALIDATE_ENDPOINTS': True},
+            request_func=lambda method, url, **kwargs: calls.append((method, url, kwargs)) or Response(),
+        )
+
+        self.assertEqual(validated[0]['validation_status'], 'hittable')
+        self.assertEqual(calls[0][0], 'OPTIONS')
+
+    def test_validate_extracted_endpoints_does_not_send_custom_headers_cross_origin(self):
+        calls = []
+
+        class Response:
+            status_code = 200
+
+        endpoints = [{
+            'full_url': 'https://analytics.vendor.example/collect',
+            'source_js': 'https://app.example.com/static/main.js',
+            'method': 'GET',
+        }]
+
+        js_recon._validate_extracted_endpoints(
+            endpoints,
+            {
+                'JS_RECON_VALIDATE_ENDPOINTS': True,
+                'JS_RECON_ENDPOINT_CUSTOM_HEADERS': [
+                    'Cookie: session=abc123',
+                    'Authorization: Bearer token',
+                ],
+            },
+            request_func=lambda method, url, **kwargs: calls.append((method, url, kwargs)) or Response(),
+        )
+
+        headers = calls[0][2]['headers']
+        self.assertNotIn('Cookie', headers)
+        self.assertNotIn('Authorization', headers)
+        self.assertEqual(headers['User-Agent'], 'Mozilla/5.0 (compatible; RedAmon-JsRecon/1.0)')
+
+    def test_validate_extracted_endpoints_keeps_404_as_not_hittable(self):
+        class Response:
+            status_code = 404
+
+        endpoints = [{
+            'full_url': 'https://api.example.com/missing',
+            'method': 'GET',
+        }]
+
+        validated = js_recon._validate_extracted_endpoints(
+            endpoints,
+            {'JS_RECON_VALIDATE_ENDPOINTS': True},
+            request_func=lambda *args, **kwargs: Response(),
+        )
+
+        self.assertEqual(len(validated), 1)
+        self.assertEqual(validated[0]['full_url'], 'https://api.example.com/missing')
+        self.assertEqual(validated[0]['validation_status'], 'not_hittable')
+        self.assertEqual(validated[0]['status_code'], 404)
+        self.assertEqual(validated[0]['resolved_url'], 'https://api.example.com/missing')
+        self.assertEqual(validated[0]['validation_error'], '')
+
+    def test_validate_extracted_endpoints_uploaded_relative_is_unvalidated(self):
+        calls = []
+        endpoints = [{
+            'path': '/api/users',
+            'source_js': 'upload://bundle.js',
+        }]
+
+        validated = js_recon._validate_extracted_endpoints(
+            endpoints,
+            {'JS_RECON_VALIDATE_ENDPOINTS': True},
+            request_func=lambda *args, **kwargs: calls.append((args, kwargs)),
+        )
+
+        self.assertEqual(validated[0]['validation_status'], 'unvalidated')
+        self.assertEqual(validated[0]['validation_error'], 'unresolved_url')
+        self.assertEqual(calls, [])
+
+    def test_validate_extracted_endpoints_relative_websocket_is_unvalidated(self):
+        calls = []
+        endpoints = [{
+            'method': 'WS',
+            'type': 'websocket',
+            'path': '/ws',
+            'source_js': 'https://app.example.com/app.js',
+        }]
+
+        validated = js_recon._validate_extracted_endpoints(
+            endpoints,
+            {'JS_RECON_VALIDATE_ENDPOINTS': True},
+            request_func=lambda *args, **kwargs: calls.append((args, kwargs)),
+        )
+
+        self.assertEqual(validated[0]['validation_status'], 'unvalidated')
+        self.assertEqual(validated[0]['validation_error'], 'unsupported_scheme')
+        self.assertEqual(calls, [])
+
+    def test_validate_extracted_endpoints_disabled_marks_unvalidated(self):
+        calls = []
+        endpoints = [{'full_url': 'https://api.example.com/users'}]
+
+        validated = js_recon._validate_extracted_endpoints(
+            endpoints,
+            {'JS_RECON_VALIDATE_ENDPOINTS': False},
+            request_func=lambda *args, **kwargs: calls.append((args, kwargs)),
+        )
+
+        self.assertIs(validated, endpoints)
+        self.assertEqual(validated[0]['validation_status'], 'unvalidated')
+        self.assertEqual(validated[0]['validation_error'], 'validation_disabled')
+        self.assertEqual(calls, [])
 
 
 # ============================================================
