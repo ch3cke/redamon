@@ -1445,6 +1445,20 @@ td:hover .tableCellCopyButton {
   flex-direction: column;
   gap: 8px;
   min-width: 180px;
+  max-height: 300px;
+  overflow-y: auto;
+  /* nicer scrollbar inside the dark tooltip */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+}
+
+.skillTooltip::-webkit-scrollbar {
+  width: 6px;
+}
+
+.skillTooltip::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.25);
+  border-radius: 3px;
 }
 
 .skillTooltipHeader {

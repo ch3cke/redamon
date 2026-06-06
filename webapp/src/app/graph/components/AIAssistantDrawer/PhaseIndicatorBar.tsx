@@ -154,6 +154,7 @@ export function PhaseIndicatorBar({
       {attackPathType && (currentPhase === 'informational' || currentPhase === 'exploitation' || currentPhase === 'post_exploitation') && (
         <Tooltip
           position="bottom"
+          interactive
           content={
             <div className={styles.skillTooltip}>
               <div className={styles.skillTooltipHeader}>
