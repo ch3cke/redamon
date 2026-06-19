@@ -301,6 +301,7 @@ services:
       - ./github_secret_hunt/output:/app/github_secret_hunt/output:rw
       - ./trufflehog_scan:/app/trufflehog_scan:ro
       - ./trufflehog_scan/output:/app/trufflehog_scan/output:rw
+      - ./ai_attack_surface_scan:/app/ai_attack_surface_scan:ro
       - ./mcp/nuclei-templates:/app/nuclei-templates:ro
       - /tmp/redamon:/tmp/redamon:rw
     environment:
@@ -309,6 +310,7 @@ services:
       GVM_IMAGE: redamon-vuln-scanner:latest
       GITHUB_HUNT_IMAGE: redamon-github-hunter:latest
       TRUFFLEHOG_IMAGE: redamon-trufflehog:latest
+      AI_ATTACK_SURFACE_IMAGE: redamon-ai-attack-surface:latest
       # Auth (forwarded to spawned containers)
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-changeme}
       # Forwarded to spawned recon containers (host network, so localhost)

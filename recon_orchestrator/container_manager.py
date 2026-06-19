@@ -20,6 +20,7 @@ from models import (
     GithubHuntState, GithubHuntStatus, GithubHuntLogEvent,
     TrufflehogState, TrufflehogStatus, TrufflehogLogEvent,
     PartialReconState, PartialReconStatus,
+    AiAttackSurfaceState, AiAttackSurfaceStatus, AiAttackSurfaceLogEvent,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,22 +79,39 @@ TRUFFLEHOG_PHASE_PATTERNS = [
     (r"SCAN SUMMARY|Final results saved|Scan complete", "Complete", 3),
 ]
 
+# AI Attack Surface phase patterns. Match ONLY the explicit [Phase N] markers
+# that ai_attack_surface_scan/main.py prints (numbered in execution order).
+# Bare keywords would false-match — e.g. "Attack" appears in the banner line
+# "AI Attack Surface scan", which would bounce the phase back to 3.
+AI_ATTACK_SURFACE_PHASE_PATTERNS = [
+    (r"\[Phase 1\]", "Safety / bounds", 1),
+    (r"\[Phase 2\]", "Target loading", 2),
+    (r"\[Phase 3\]", "Attack", 3),
+    (r"\[Phase 4\]", "Findings", 4),
+]
+
 
 class ContainerManager:
     """Manages Docker containers for recon, GVM scan, GitHub hunt, and TruffleHog processes"""
 
-    def __init__(self, recon_image: str = "redamon-recon:latest", gvm_image: str = "redamon-vuln-scanner:latest", github_hunt_image: str = "redamon-github-hunter:latest", trufflehog_image: str = "redamon-trufflehog:latest"):
+    def __init__(self, recon_image: str = "redamon-recon:latest", gvm_image: str = "redamon-vuln-scanner:latest", github_hunt_image: str = "redamon-github-hunter:latest", trufflehog_image: str = "redamon-trufflehog:latest", ai_attack_image: str = "redamon-ai-attack-surface:latest"):
         self.client = docker.from_env()
         self.recon_image = recon_image
         self.gvm_image = gvm_image
         self.github_hunt_image = github_hunt_image
         self.trufflehog_image = trufflehog_image
+        self.ai_attack_image = ai_attack_image
         self.running_states: dict[str, ReconState] = {}
         # Nested dict: outer key = project_id, inner key = run_id
         self.partial_recon_states: dict[str, dict[str, PartialReconState]] = {}
         self.gvm_states: dict[str, GvmState] = {}
         self.github_hunt_states: dict[str, GithubHuntState] = {}
         self.trufflehog_states: dict[str, TrufflehogState] = {}
+        # AI Attack Surface: nested project_id -> run_id (parallel per-tool jobs).
+        self.ai_attack_states: dict[str, dict[str, AiAttackSurfaceState]] = {}
+        # Set by api.py after construction: the on-demand Ollama judge manager
+        # (Step 1). The AI attack lifecycle ref-counts a judge lease through it.
+        self.local_llm_manager = None
         self._log_tasks: dict[str, asyncio.Task] = {}
 
     def _get_container_name(self, project_id: str) -> str:
@@ -943,6 +961,370 @@ class ContainerManager:
                 log=f"Error streaming partial recon logs: {e}",
                 timestamp=datetime.now(timezone.utc),
                 level="error",
+            )
+
+    # =========================================================================
+    # AI Attack Surface Container Lifecycle
+    # =========================================================================
+
+    def _get_ai_attack_container_name(self, project_id: str, run_id: str) -> str:
+        """Generate container name for an AI Attack Surface run"""
+        safe_id = re.sub(r'[^a-zA-Z0-9_.-]', '_', project_id)
+        return f"redamon-ai-attack-{safe_id}-{run_id[:8]}"
+
+    def _count_active_ai_attack(self, project_id: str) -> int:
+        return sum(
+            1 for s in self.ai_attack_states.get(project_id, {}).values()
+            if s.status in (AiAttackSurfaceStatus.RUNNING, AiAttackSurfaceStatus.STARTING)
+        )
+
+    def get_ai_attack_running_count(self) -> int:
+        return sum(
+            1 for runs in self.ai_attack_states.values() for s in runs.values()
+            if s.status in (AiAttackSurfaceStatus.RUNNING, AiAttackSurfaceStatus.STARTING)
+        )
+
+    def _release_llm(self, state: AiAttackSurfaceState) -> None:
+        """Release this job's Ollama judge lease exactly once (ref-counted).
+
+        Guarded by state.llm_leased so a job that ends, is polled, and is then
+        explicitly stopped never double-releases (which would tear the judge down
+        while a sibling tool of the same scan still needs it)."""
+        if state.llm_leased and self.local_llm_manager:
+            try:
+                self.local_llm_manager.release()
+                logger.info(f"Released Ollama judge lease for {state.project_id}/{state.run_id}")
+            except Exception as e:
+                logger.warning(f"Failed to release Ollama lease: {e}")
+        state.llm_leased = False
+
+    def _refresh_ai_attack_state(self, state: AiAttackSurfaceState) -> None:
+        """Refresh a run's state from its container; release the judge on finish."""
+        if not state.container_id:
+            return
+        if state.status in (AiAttackSurfaceStatus.COMPLETED, AiAttackSurfaceStatus.ERROR, AiAttackSurfaceStatus.IDLE):
+            return
+        try:
+            container = self.client.containers.get(state.container_id)
+            if container.status != "running":
+                exit_code = container.attrs.get("State", {}).get("ExitCode", -1)
+                if exit_code == 0:
+                    state.status = AiAttackSurfaceStatus.COMPLETED
+                else:
+                    state.status = AiAttackSurfaceStatus.ERROR
+                    state.error = f"Container exited with code {exit_code}"
+                state.completed_at = datetime.now(timezone.utc)
+                # Job ended on its own -> free the shared judge lease.
+                self._release_llm(state)
+                try:
+                    container.remove()
+                    logger.info(f"Auto-removed AI attack container for {state.project_id}/{state.run_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to auto-remove AI attack container: {e}")
+        except NotFound:
+            if state.status not in (AiAttackSurfaceStatus.COMPLETED, AiAttackSurfaceStatus.ERROR):
+                state.status = AiAttackSurfaceStatus.ERROR
+                state.error = "Container not found"
+                self._release_llm(state)
+        except APIError as e:
+            logger.warning(f"Docker API error checking AI attack {state.project_id}/{state.run_id}: {e}")
+
+    async def get_ai_attack_surface_status(self, project_id: str, run_id: str) -> AiAttackSurfaceState:
+        runs = self.ai_attack_states.get(project_id, {})
+        state = runs.get(run_id)
+        if state:
+            self._refresh_ai_attack_state(state)
+            return state
+        return AiAttackSurfaceState(
+            project_id=project_id, run_id=run_id, status=AiAttackSurfaceStatus.IDLE,
+        )
+
+    async def get_all_ai_attack_surface_statuses(self, project_id: str) -> list[AiAttackSurfaceState]:
+        runs = self.ai_attack_states.get(project_id, {})
+        to_remove = []
+        for run_id, state in runs.items():
+            self._refresh_ai_attack_state(state)
+            if state.status in (AiAttackSurfaceStatus.COMPLETED, AiAttackSurfaceStatus.ERROR):
+                if state.completed_at and (datetime.now(timezone.utc) - state.completed_at).total_seconds() > 60:
+                    to_remove.append(run_id)
+        for run_id in to_remove:
+            del runs[run_id]
+        if not runs and project_id in self.ai_attack_states:
+            del self.ai_attack_states[project_id]
+        return list(runs.values())
+
+    async def start_ai_attack_surface(
+        self,
+        project_id: str,
+        user_id: str,
+        webapp_api_url: str,
+        run_config: dict,
+        ai_attack_path: str,
+    ) -> AiAttackSurfaceState:
+        """Spawn an AI Attack Surface job: ensure the Ollama judge is up
+        (ref-counted), write the run config, and start the scan container.
+
+        `run_config` is the shape ai_attack_surface_scan/config.py expects
+        (tool, targets, bounds, roe_confirmed, dry_run).
+        """
+        import json
+
+        run_id = str(uuid.uuid4())
+        container_name = self._get_ai_attack_container_name(project_id, run_id)
+        tool = run_config.get("tool", "skeleton")
+
+        state = AiAttackSurfaceState(
+            project_id=project_id, run_id=run_id, tool=tool,
+            status=AiAttackSurfaceStatus.STARTING,
+            started_at=datetime.now(timezone.utc),
+        )
+        self.ai_attack_states.setdefault(project_id, {})[run_id] = state
+
+        try:
+            # Ensure the scanner image exists.
+            try:
+                self.client.images.get(self.ai_attack_image)
+            except NotFound:
+                logger.info(f"Building AI attack image from {ai_attack_path}")
+                self.client.images.build(
+                    path=Path(ai_attack_path).parent.as_posix(),
+                    dockerfile=f"{Path(ai_attack_path).name}/Dockerfile",
+                    tag=self.ai_attack_image,
+                    rm=True,
+                )
+
+            # Bring up the Ollama judge (ref-counted), unless this is a dry run
+            # or no judge model is configured. Failure-soft: ensure_up never
+            # raises; the scan degrades to no-judge.
+            judge_model = (run_config.get("bounds") or {}).get("judge_model")
+            if self.local_llm_manager and judge_model and not run_config.get("dry_run"):
+                llm_status = await asyncio.to_thread(self.local_llm_manager.ensure_up, judge_model)
+                state.llm_leased = True
+                run_config["judge_base_url"] = llm_status.base_url
+                if not llm_status.available:
+                    logger.warning(
+                        f"Ollama judge unavailable ({llm_status.warning}); "
+                        f"scan will degrade to no-judge"
+                    )
+
+            # Write the run config to the shared /tmp/redamon volume.
+            config_dir = Path("/tmp/redamon")
+            config_dir.mkdir(parents=True, exist_ok=True)
+            config_path = config_dir / f"ai_attack_{project_id}_{run_id}.json"
+            run_config.setdefault("project_id", project_id)
+            run_config.setdefault("user_id", user_id)
+            run_config.setdefault("run_id", run_id)
+            with open(config_path, "w") as f:
+                json.dump(run_config, f)
+
+            container = self.client.containers.run(
+                self.ai_attack_image,
+                name=container_name,
+                detach=True,
+                network_mode="host",
+                environment={
+                    "PROJECT_ID": project_id,
+                    "USER_ID": user_id,
+                    "WEBAPP_API_URL": webapp_api_url,
+                    "PYTHONUNBUFFERED": "1",
+                    "AI_ATTACK_CONFIG": f"/tmp/redamon/ai_attack_{project_id}_{run_id}.json",
+                    "AI_ATTACK_RUN_ID": run_id,
+                    "AI_ATTACK_TOOL": tool,
+                    "NEO4J_URI": os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
+                    "NEO4J_USER": os.environ.get("NEO4J_USER", "neo4j"),
+                    "NEO4J_PASSWORD": os.environ.get("NEO4J_PASSWORD", ""),
+                    "INTERNAL_API_KEY": os.environ.get("INTERNAL_API_KEY", ""),
+                },
+                volumes={
+                    "/tmp/redamon": {"bind": "/tmp/redamon", "mode": "rw"},
+                    # Mount source for dev (no rebuild needed), like the other scanners.
+                    f"{ai_attack_path}": {"bind": "/app/ai_attack_surface_scan", "mode": "rw"},
+                },
+                command="python ai_attack_surface_scan/main.py",
+            )
+
+            state.container_id = container.id
+            state.status = AiAttackSurfaceStatus.RUNNING
+            logger.info(
+                f"Started AI attack container {container.id} for project {project_id}, "
+                f"tool {tool}, run {run_id}"
+            )
+        except Exception as e:
+            state.status = AiAttackSurfaceStatus.ERROR
+            state.error = str(e)
+            # Don't leak the judge lease if the spawn failed after ensure_up.
+            self._release_llm(state)
+            logger.error(f"Failed to start AI attack surface for {project_id}/{run_id}: {e}")
+
+        return state
+
+    async def stop_ai_attack_surface(self, project_id: str, run_id: str, timeout: int = 10) -> AiAttackSurfaceState:
+        state = await self.get_ai_attack_surface_status(project_id, run_id)
+
+        if state.status in (AiAttackSurfaceStatus.RUNNING, AiAttackSurfaceStatus.STARTING):
+            state.status = AiAttackSurfaceStatus.STOPPING
+            if state.container_id:
+                try:
+                    container = self.client.containers.get(state.container_id)
+                    container.stop(timeout=timeout)
+                    container.remove()
+                    state.status = AiAttackSurfaceStatus.IDLE
+                    state.completed_at = datetime.now(timezone.utc)
+                    logger.info(f"Stopped AI attack container for {project_id}/{run_id}")
+                except NotFound:
+                    state.status = AiAttackSurfaceStatus.IDLE
+                except Exception as e:
+                    state.status = AiAttackSurfaceStatus.ERROR
+                    state.error = f"Failed to stop: {e}"
+
+        # Release the judge lease (idempotent) and clean up state + config file.
+        self._release_llm(state)
+        runs = self.ai_attack_states.get(project_id, {})
+        if run_id in runs:
+            del runs[run_id]
+        if not runs and project_id in self.ai_attack_states:
+            del self.ai_attack_states[project_id]
+        try:
+            cfg = Path(f"/tmp/redamon/ai_attack_{project_id}_{run_id}.json")
+            if cfg.exists():
+                cfg.unlink()
+        except Exception:
+            pass
+
+        return state
+
+    def _parse_ai_attack_log_line(self, line: str, current_phase: Optional[str], current_phase_num: Optional[int], timestamp: Optional[datetime] = None) -> AiAttackSurfaceLogEvent:
+        """Parse an AI Attack Surface log line and detect [Phase N] changes."""
+        if timestamp is None:
+            timestamp = datetime.now(timezone.utc)
+        phase = current_phase
+        phase_num = current_phase_num
+        is_phase_start = False
+        level = "info"
+
+        line = ANSI_ESCAPE.sub('', line)
+        if "[!]" in line:
+            level = "error"
+        elif "[+]" in line or "[✓]" in line:
+            level = "success"
+        elif "[*]" in line:
+            level = "action"
+
+        for pattern, phase_name, num in AI_ATTACK_SURFACE_PHASE_PATTERNS:
+            if re.search(pattern, line, re.IGNORECASE):
+                if phase_name != current_phase:
+                    phase = phase_name
+                    phase_num = num
+                    is_phase_start = True
+                break
+
+        return AiAttackSurfaceLogEvent(
+            log=line.rstrip(), timestamp=timestamp, phase=phase,
+            phase_number=phase_num, is_phase_start=is_phase_start, level=level,
+        )
+
+    async def stream_ai_attack_surface_logs(self, project_id: str, run_id: str) -> AsyncGenerator[AiAttackSurfaceLogEvent, None]:
+        """Stream logs from an AI Attack Surface container via SSE, with phase
+        detection and reconnect resume (mirrors stream_partial_logs)."""
+        state = await self.get_ai_attack_surface_status(project_id, run_id)
+
+        if not state.container_id:
+            yield AiAttackSurfaceLogEvent(
+                log="No AI attack container found for this run",
+                timestamp=datetime.now(timezone.utc), level="error",
+            )
+            return
+
+        current_phase: Optional[str] = "Safety / bounds"
+        current_phase_num: Optional[int] = 1
+
+        try:
+            container = self.client.containers.get(state.container_id)
+            log_queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            since_ts = None
+            if state.last_log_timestamp is not None:
+                since_ts = state.last_log_timestamp + timedelta(microseconds=1)
+
+            def read_logs():
+                try:
+                    log_stream_kwargs = {"stream": True, "follow": True, "timestamps": True}
+                    if since_ts is not None:
+                        log_stream_kwargs["since"] = since_ts
+                    for line in container.logs(**log_stream_kwargs):
+                        asyncio.run_coroutine_threadsafe(log_queue.put(line), loop).result(timeout=5)
+                        try:
+                            container.reload()
+                            if container.status not in ("running", "paused"):
+                                break
+                        except Exception:
+                            break
+                except Exception as e:
+                    logger.error(f"Error in AI attack log reader: {e}")
+                finally:
+                    try:
+                        asyncio.run_coroutine_threadsafe(log_queue.put(None), loop).result(timeout=5)
+                    except Exception:
+                        pass
+
+            loop.run_in_executor(None, read_logs)
+
+            while True:
+                try:
+                    line = await asyncio.wait_for(log_queue.get(), timeout=1.0)
+                    if line is None:
+                        break
+                    decoded_line = line.decode("utf-8", errors="replace").rstrip()
+                    if not decoded_line:
+                        continue
+                    docker_ts = None
+                    log_text = decoded_line
+                    if len(decoded_line) > 30 and decoded_line[4] == '-' and decoded_line[10] == 'T':
+                        space_idx = decoded_line.find(' ')
+                        if space_idx > 0:
+                            ts_str = decoded_line[:space_idx]
+                            try:
+                                ts_clean = ts_str.replace('Z', '+00:00')
+                                dot_idx = ts_clean.find('.')
+                                plus_idx = ts_clean.find('+', dot_idx) if dot_idx > 0 else -1
+                                if dot_idx > 0 and plus_idx > 0:
+                                    frac = ts_clean[dot_idx + 1:plus_idx][:6]
+                                    ts_clean = ts_clean[:dot_idx + 1] + frac + ts_clean[plus_idx:]
+                                docker_ts = datetime.fromisoformat(ts_clean)
+                                log_text = decoded_line[space_idx + 1:]
+                            except (ValueError, OverflowError):
+                                pass
+
+                    event = self._parse_ai_attack_log_line(log_text, current_phase, current_phase_num, timestamp=docker_ts)
+                    if event.is_phase_start:
+                        current_phase = event.phase
+                        current_phase_num = event.phase_number
+                    if docker_ts is not None:
+                        runs = self.ai_attack_states.get(project_id, {})
+                        if run_id in runs:
+                            cur = runs[run_id].last_log_timestamp
+                            if cur is None or docker_ts > cur:
+                                runs[run_id].last_log_timestamp = docker_ts
+                    yield event
+
+                except asyncio.TimeoutError:
+                    try:
+                        container.reload()
+                        if container.status not in ("running", "paused"):
+                            break
+                    except Exception:
+                        break
+
+        except (NotFound, APIError):
+            yield AiAttackSurfaceLogEvent(
+                log="AI attack container stopped",
+                timestamp=datetime.now(timezone.utc), level="info",
+            )
+        except Exception as e:
+            yield AiAttackSurfaceLogEvent(
+                log=f"Error streaming AI attack logs: {e}",
+                timestamp=datetime.now(timezone.utc), level="error",
             )
 
     # =========================================================================

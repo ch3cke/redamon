@@ -34,6 +34,10 @@ from models import (
     PartialReconState,
     PartialReconStatus,
     PartialReconListResponse,
+    AiAttackSurfaceStartRequest,
+    AiAttackSurfaceState,
+    AiAttackSurfaceStatus,
+    AiAttackSurfaceListResponse,
 )
 
 # Configure logging
@@ -102,6 +106,12 @@ GITHUB_HUNT_IMAGE = os.getenv("GITHUB_HUNT_IMAGE", "redamon-github-hunter:latest
 TRUFFLEHOG_PATH = _get_host_path(_host_mounts, "/app/trufflehog_scan", "TRUFFLEHOG_PATH")
 TRUFFLEHOG_IMAGE = os.getenv("TRUFFLEHOG_IMAGE", "redamon-trufflehog:latest")
 try:
+    AI_ATTACK_SURFACE_PATH = _get_host_path(_host_mounts, "/app/ai_attack_surface_scan", "AI_ATTACK_SURFACE_PATH")
+except RuntimeError:
+    AI_ATTACK_SURFACE_PATH = ""
+    logger.info("AI Attack Surface source not mounted — feature disabled until mounted")
+AI_ATTACK_SURFACE_IMAGE = os.getenv("AI_ATTACK_SURFACE_IMAGE", "redamon-ai-attack-surface:latest")
+try:
     CUSTOM_TEMPLATES_PATH = _get_host_path(_host_mounts, "/app/nuclei-templates", "CUSTOM_TEMPLATES_PATH")
 except RuntimeError:
     CUSTOM_TEMPLATES_PATH = ""
@@ -119,9 +129,11 @@ async def lifespan(app: FastAPI):
     """Initialize and cleanup resources"""
     global container_manager, local_llm_manager
     logger.info("Starting Recon Orchestrator...")
-    container_manager = ContainerManager(recon_image=RECON_IMAGE, gvm_image=GVM_IMAGE, github_hunt_image=GITHUB_HUNT_IMAGE, trufflehog_image=TRUFFLEHOG_IMAGE)
+    container_manager = ContainerManager(recon_image=RECON_IMAGE, gvm_image=GVM_IMAGE, github_hunt_image=GITHUB_HUNT_IMAGE, trufflehog_image=TRUFFLEHOG_IMAGE, ai_attack_image=AI_ATTACK_SURFACE_IMAGE)
     # Share the orchestrator's docker client so the LLM lifecycle uses the same daemon.
     local_llm_manager = LocalLlmManager(client=container_manager.client)
+    # The AI Attack Surface lifecycle ref-counts an Ollama judge lease through it.
+    container_manager.local_llm_manager = local_llm_manager
     yield
     logger.info("Shutting down Recon Orchestrator...")
     if local_llm_manager:
@@ -156,6 +168,7 @@ async def health_check():
         running_gvm_scans=container_manager.get_gvm_running_count() if container_manager else 0,
         running_github_hunts=container_manager.get_github_hunt_running_count() if container_manager else 0,
         running_trufflehog_scans=container_manager.get_trufflehog_running_count() if container_manager else 0,
+        running_ai_attack_scans=container_manager.get_ai_attack_running_count() if container_manager else 0,
         gvm_available=container_manager.is_gvm_available() if container_manager else False,
     )
 
@@ -865,6 +878,106 @@ async def upload_artifact(project_id: str, artifact_type: str, file: UploadFile)
     except Exception as e:
         logger.error(f"Failed to upload artifact: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# AI Attack Surface Endpoints
+# =============================================================================
+
+
+@app.post("/ai-attack-surface/{project_id}/start", response_model=AiAttackSurfaceState)
+async def start_ai_attack_surface(project_id: str, request: AiAttackSurfaceStartRequest):
+    """Start an AI Attack Surface job (one tool) against selected AI nodes.
+
+    Brings up the on-demand Ollama judge (ref-counted) and spawns the
+    ai_attack_surface_scan container. Launch reuses the partial-recon Run model:
+    it runs a tool against the existing graph without re-crawling.
+    """
+    if not container_manager:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+    if not AI_ATTACK_SURFACE_PATH:
+        raise HTTPException(
+            status_code=503,
+            detail="AI Attack Surface source not mounted into the orchestrator",
+        )
+
+    run_config = {
+        "tool": request.tool,
+        "targets": request.targets,
+        "bounds": request.bounds,
+        "roe_confirmed": request.roe_confirmed,
+        "dry_run": request.dry_run,
+        "user_id": request.user_id,
+        "webapp_api_url": request.webapp_api_url,
+    }
+
+    try:
+        state = await container_manager.start_ai_attack_surface(
+            project_id=project_id,
+            user_id=request.user_id,
+            webapp_api_url=request.webapp_api_url,
+            run_config=run_config,
+            ai_attack_path=AI_ATTACK_SURFACE_PATH,
+        )
+        return state
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error starting AI attack surface: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ai-attack-surface/{project_id}/all", response_model=AiAttackSurfaceListResponse)
+async def list_ai_attack_surface(project_id: str):
+    if not container_manager:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+    runs = await container_manager.get_all_ai_attack_surface_statuses(project_id)
+    return AiAttackSurfaceListResponse(project_id=project_id, runs=runs)
+
+
+@app.get("/ai-attack-surface/{project_id}/{run_id}/status", response_model=AiAttackSurfaceState)
+async def get_ai_attack_surface_status(project_id: str, run_id: str):
+    if not container_manager:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+    return await container_manager.get_ai_attack_surface_status(project_id, run_id)
+
+
+@app.post("/ai-attack-surface/{project_id}/{run_id}/stop", response_model=AiAttackSurfaceState)
+async def stop_ai_attack_surface(project_id: str, run_id: str):
+    if not container_manager:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+    return await container_manager.stop_ai_attack_surface(project_id, run_id)
+
+
+@app.get("/ai-attack-surface/{project_id}/{run_id}/logs")
+async def stream_ai_attack_surface_logs(project_id: str, run_id: str):
+    """Stream logs from an AI Attack Surface container via SSE."""
+    if not container_manager:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+
+    state = await container_manager.get_ai_attack_surface_status(project_id, run_id)
+    if state.status == AiAttackSurfaceStatus.IDLE:
+        raise HTTPException(status_code=404, detail="No AI attack surface job found")
+
+    async def event_generator():
+        try:
+            async for event in container_manager.stream_ai_attack_surface_logs(project_id, run_id):
+                yield {
+                    "event": "log",
+                    "data": json.dumps({
+                        "log": event.log,
+                        "timestamp": event.timestamp.isoformat(),
+                        "phase": event.phase,
+                        "phaseNumber": event.phase_number,
+                        "isPhaseStart": event.is_phase_start,
+                        "level": event.level,
+                    }),
+                }
+        except Exception as e:
+            logger.error(f"Error streaming AI attack surface logs: {e}")
+            yield {"event": "error", "data": json.dumps({"error": str(e)})}
+
+    return EventSourceResponse(event_generator())
 
 
 # =============================================================================

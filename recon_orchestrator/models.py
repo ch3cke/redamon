@@ -57,6 +57,7 @@ class HealthResponse(BaseModel):
     running_gvm_scans: int = 0
     running_github_hunts: int = 0
     running_trufflehog_scans: int = 0
+    running_ai_attack_scans: int = 0
     gvm_available: bool = False
 
 
@@ -249,3 +250,67 @@ class PartialReconListResponse(BaseModel):
     """Response listing all partial recon runs for a project"""
     project_id: str
     runs: list[PartialReconState]
+
+
+# =============================================================================
+# AI Attack Surface Models
+# =============================================================================
+
+
+class AiAttackSurfaceStatus(str, Enum):
+    """Status of an AI Attack Surface scan job"""
+    IDLE = "idle"
+    STARTING = "starting"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    ERROR = "error"
+    STOPPING = "stopping"
+
+
+class AiAttackSurfaceStartRequest(BaseModel):
+    """Request to start an AI Attack Surface job for a single tool"""
+    project_id: str
+    user_id: str
+    webapp_api_url: str = ""
+    tool: str = "skeleton"                     # skeleton / garak / pyrit / giskard / promptfoo
+    targets: list[dict] = []                   # picker selection: [{baseurl, path, method}]
+    bounds: dict = {}                          # {trials, asr_threshold, judge_model, max_turns}
+    roe_confirmed: bool = False                # a launch is a confirmed action (§10)
+    dry_run: bool = False
+
+
+class AiAttackSurfaceState(BaseModel):
+    """Current state of an AI Attack Surface scan job"""
+    project_id: str
+    run_id: str = ""
+    tool: str = ""
+    status: AiAttackSurfaceStatus = AiAttackSurfaceStatus.IDLE
+    current_phase: Optional[str] = None
+    phase_number: Optional[Union[int, float]] = None
+    total_phases: int = 4
+    container_id: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    error: Optional[str] = None
+    # Whether this job currently holds an Ollama judge lease (ref-counted).
+    # Internal bookkeeping so we release exactly once when the job ends.
+    llm_leased: bool = False
+    # SSE reconnect high-water mark (same role as PartialReconState).
+    last_log_timestamp: Optional[datetime] = None
+
+
+class AiAttackSurfaceLogEvent(BaseModel):
+    """A single log event from an AI Attack Surface container"""
+    log: str
+    timestamp: datetime
+    phase: Optional[str] = None
+    phase_number: Optional[Union[int, float]] = None
+    is_phase_start: bool = False
+    is_phase_end: bool = False
+    level: str = "info"
+
+
+class AiAttackSurfaceListResponse(BaseModel):
+    """Response listing all AI Attack Surface runs for a project"""
+    project_id: str
+    runs: list[AiAttackSurfaceState]
