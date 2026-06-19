@@ -147,6 +147,12 @@ class TestTargetLoader(unittest.TestCase):
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0].ai_interface_type, "llm-chat")
         self.assertEqual(targets[0].method, "POST")
+        # Headless path defaults to the chat surface and excludes the non-llm
+        # sentinel — NOT "any ai_interface_type" (recon stamps every endpoint).
+        kw = session.run.call_args.kwargs
+        self.assertEqual(kw["ifaces"], ["llm-chat", "llm-completion"])
+        self.assertEqual(kw["non_llm"], "non-llm")
+        self.assertNotIn("IS NOT NULL", session.run.call_args.args[0])
 
     def test_load_selected_found(self):
         session = MagicMock()

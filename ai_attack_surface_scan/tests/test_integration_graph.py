@@ -78,6 +78,16 @@ class TestGraphIntegration(unittest.TestCase):
         self.assertEqual(targets[0].ai_interface_type, "llm-chat")
         self.assertEqual(targets[0].path, "/v1/chat/completions")
 
+    def test_load_all_ai_excludes_non_llm_sentinel(self):
+        # recon stamps every crawled endpoint; only chat endpoints are attackable.
+        self._seed_endpoint("http://h:8000", "/v1/chat/completions", iface="llm-chat")
+        self._seed_endpoint("http://h:8000", "/about", iface="non-llm")
+        self._seed_endpoint("http://h:8000", "/v1/embeddings", iface="llm-embedding")
+        with self.driver.session() as s:
+            targets = tl.load_targets(s, UID, PID)  # headless: no explicit selection
+        paths = sorted(t.path for t in targets)
+        self.assertEqual(paths, ["/v1/chat/completions"])  # non-llm + embedding excluded
+
     def test_load_selected_enriches_from_graph(self):
         self._seed_endpoint("http://h:8000", "/v1/chat/completions")
         with self.driver.session() as s:

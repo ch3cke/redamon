@@ -24,6 +24,15 @@ INTERFACE_FILTERS: dict[str, list[str]] = {
     "mcp": ["mcp"],
 }
 
+# The chat surface the four core tools attack (§2.2). recon stamps EVERY crawled
+# endpoint with an ai_interface_type, using the literal 'non-llm' sentinel for
+# non-LLM endpoints — so "IS NOT NULL" is NOT a safe selector. The headless
+# (no-explicit-selection) path defaults to these attackable types; non-chat
+# tools (future RAG/tool-call cards) pass their own interface_types.
+ATTACK_SURFACE_INTERFACE_TYPES: list[str] = ["llm-chat", "llm-completion"]
+# Sentinel recon writes for classified-but-not-LLM endpoints — never attackable.
+NON_LLM_SENTINEL = "non-llm"
+
 
 @dataclass
 class Target:
@@ -82,27 +91,28 @@ def load_targets(
     - `selected`: explicit picker rows ({baseurl, path, method}); each is matched
       to its Endpoint and enriched. This is the normal UI path (the user must
       explicitly select which nodes to attack, §2).
-    - else: load every Endpoint carrying an `ai_interface_type` (optionally
-      narrowed to `interface_types`). Convenience for headless/skeleton runs.
+    - else: load every attackable chat Endpoint. `interface_types` narrows it;
+      when omitted it defaults to the chat surface (NOT "any ai_interface_type"
+      — recon stamps every crawled endpoint, mostly with the 'non-llm' sentinel).
     """
     if selected:
         return _load_selected(session, user_id, project_id, selected)
+    if interface_types is None:
+        interface_types = ATTACK_SURFACE_INTERFACE_TYPES
     return _load_all_ai(session, user_id, project_id, interface_types)
 
 
 def _load_all_ai(session, user_id, project_id, interface_types) -> list[Target]:
     cypher = f"""
         MATCH (e:Endpoint {{user_id: $uid, project_id: $pid}})
-        WHERE e.ai_interface_type IS NOT NULL
-          AND ($ifaces IS NULL OR e.ai_interface_type IN $ifaces)
+        WHERE e.ai_interface_type IN $ifaces
+          AND e.ai_interface_type <> $non_llm
         RETURN {_RETURN}
     """
-    rows = session.run(cypher, uid=user_id, pid=project_id, ifaces=interface_types)
+    rows = session.run(cypher, uid=user_id, pid=project_id,
+                       ifaces=interface_types, non_llm=NON_LLM_SENTINEL)
     targets = [_row_to_target(r.data()) for r in rows]
-    logger.info(
-        f"Target loader: {len(targets)} AI endpoint(s) "
-        f"(filter={interface_types or 'any ai_interface_type'})"
-    )
+    logger.info(f"Target loader: {len(targets)} AI endpoint(s) (filter={interface_types})")
     return targets
 
 
