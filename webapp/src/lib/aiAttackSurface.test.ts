@@ -4,7 +4,8 @@
  */
 import { describe, test, expect } from 'vitest'
 import {
-  ALL_CARDS, ATTACK_CHIPS, FUTURE_CARDS, GARAK_CARD,
+  ALL_CARDS, ATTACK_CHIPS, FUTURE_CARDS, GARAK_CARD, PYRIT_CARD,
+  resolveAuth, splitUrl,
   type ChipKey,
 } from './aiAttackSurface'
 
@@ -39,11 +40,13 @@ describe('cards', () => {
     }
   })
 
-  test('garak is the only available card; the rest are greyed (future)', () => {
+  test('garak + pyrit are available; giskard/promptfoo are greyed (future)', () => {
     expect(GARAK_CARD.available).toBe(true)
+    expect(PYRIT_CARD.available).toBe(true)
     expect(FUTURE_CARDS.every((c) => !c.available)).toBe(true)
     expect(ALL_CARDS).toHaveLength(4)
     expect(ALL_CARDS[0]).toBe(GARAK_CARD)
+    expect(PYRIT_CARD.probes.map((p) => p.id)).toEqual(['crescendo', 'skeleton_key'])
   })
 
   test('garak probe families match the documented MVP set', () => {
@@ -54,5 +57,32 @@ describe('cards', () => {
   test('card ids are unique', () => {
     const ids = ALL_CARDS.map((c) => c.id)
     expect(new Set(ids).size).toBe(ids.length)
+  })
+})
+
+describe('resolveAuth (shared, reused by all tools)', () => {
+  test('none -> no header', () => {
+    expect(resolveAuth({ mode: 'none' })).toEqual({ api_key: '', auth_header: '', auth_scheme: '' })
+  })
+  test('bearer -> Authorization + Bearer scheme', () => {
+    expect(resolveAuth({ mode: 'bearer', bearerToken: 'sk-1' }))
+      .toEqual({ api_key: 'sk-1', auth_header: 'Authorization', auth_scheme: 'Bearer' })
+  })
+  test('custom -> named header, no scheme', () => {
+    expect(resolveAuth({ mode: 'custom', headerName: 'x-api-key', headerValue: 'k' }))
+      .toEqual({ api_key: 'k', auth_header: 'x-api-key', auth_scheme: '' })
+  })
+})
+
+describe('splitUrl (custom target parsing)', () => {
+  test('splits host and path+query', () => {
+    expect(splitUrl('https://api.example.com:8443/v1/chat/completions?x=1'))
+      .toEqual({ baseUrl: 'https://api.example.com:8443', path: '/v1/chat/completions?x=1' })
+  })
+  test('bare host -> root path', () => {
+    expect(splitUrl('http://h:11434')).toEqual({ baseUrl: 'http://h:11434', path: '/' })
+  })
+  test('garbage -> null', () => {
+    expect(splitUrl('not a url')).toBeNull()
   })
 })

@@ -65,14 +65,32 @@ export const GARAK_CARD: ToolCard = {
   available: true,
 }
 
-// Future tools — shown greyed until their adapter ships (Steps 6-8).
+// PyRIT (Step 6) — bounded multi-turn. Its "probes" are the attack strategies;
+// they flow through the same `probes` field garak uses.
+export const PYRIT_CARD: ToolCard = {
+  id: 'pyrit',
+  name: 'PyRIT',
+  license: 'MIT',
+  style: 'multi-turn',
+  purpose: 'Bounded multi-turn jailbreaks',
+  requires: 'chat',
+  chips: ['jailbreak', 'prompt-injection', 'system-prompt-leak'],
+  probes: [
+    { id: 'crescendo', label: 'Crescendo (gradual escalation)', chip: 'jailbreak' },
+    { id: 'skeleton_key', label: 'Skeleton Key (safety override)', chip: 'jailbreak' },
+  ],
+  available: true,
+}
+
+// Future tools — shown greyed until their adapter ships (Steps 7-8).
 export const FUTURE_CARDS: ToolCard[] = [
-  { id: 'pyrit', name: 'PyRIT', license: 'MIT', style: 'multi-turn', purpose: 'Bounded multi-turn jailbreaks', requires: 'chat', chips: ['jailbreak', 'prompt-injection', 'system-prompt-leak'], probes: [], available: false },
   { id: 'giskard', name: 'giskard', license: 'Apache-2.0', style: 'scan', purpose: 'Quality + safety scan', requires: 'chat', chips: ['hallucination', 'bias', 'prompt-injection', 'toxicity', 'data-disclosure'], probes: [], available: false },
   { id: 'promptfoo', name: 'promptfoo', license: 'MIT', style: 'eval', purpose: 'Red-team eval + ASR', requires: 'chat', chips: ['prompt-injection', 'jailbreak', 'data-disclosure', 'toxicity'], probes: [], available: false },
 ]
 
-export const ALL_CARDS: ToolCard[] = [GARAK_CARD, ...FUTURE_CARDS]
+export const ALL_CARDS: ToolCard[] = [GARAK_CARD, PYRIT_CARD, ...FUTURE_CARDS]
+// Tools whose detail view + launch are wired in the UI.
+export const ACTIVE_CARDS: ToolCard[] = ALL_CARDS.filter((c) => c.available)
 
 export interface AiTarget {
   baseUrl: string

@@ -75,13 +75,13 @@ describe('AI Attack Surface page', () => {
 
   test('garak Configure stays enabled with no endpoint (custom targets allowed)', () => {
     render(<AiAttackSurfacePage />)   // targets = [] by default
-    const btn = screen.getByText('Configure') as HTMLButtonElement
+    const btn = screen.getAllByText('Configure')[0] as HTMLButtonElement
     expect(btn.disabled).toBe(false)
   })
 
   test('opening garak with no endpoints still shows the custom-target form + auth', () => {
     render(<AiAttackSurfacePage />)
-    fireEvent.click(screen.getByText('Configure'))
+    fireEvent.click(screen.getAllByText('Configure')[0])
     expect(screen.getByText(/Attack a URL not in the graph/)).toBeTruthy()
     expect(screen.getByText('Target authentication')).toBeTruthy()
     expect(screen.getByText('Bearer token')).toBeTruthy()
@@ -90,10 +90,21 @@ describe('AI Attack Surface page', () => {
   test('opening garak (with a target) shows the four-block detail + the target row', () => {
     hookState.targets = [{ baseUrl: 'http://h:8000', path: '/v1/chat/completions', method: 'POST', interfaceType: 'llm-chat', modelFamily: 'qwen' }]
     render(<AiAttackSurfacePage />)
-    fireEvent.click(screen.getByText('Configure'))
+    fireEvent.click(screen.getAllByText('Configure')[0])   // garak is first
     expect(screen.getByText('1. Targets')).toBeTruthy()
     expect(screen.getByText('2. Probes')).toBeTruthy()
     expect(screen.getByText('3. Run bounds')).toBeTruthy()
     expect(screen.getByText('http://h:8000/v1/chat/completions')).toBeTruthy()
+  })
+
+  test('opening PyRIT shows the multi-turn strategy block + Max turns', () => {
+    render(<AiAttackSurfacePage />)
+    // garak + pyrit both have a Configure button; pyrit is the second.
+    fireEvent.click(screen.getAllByText('Configure')[1])
+    expect(screen.getByText('PyRIT — configure run')).toBeTruthy()
+    expect(screen.getByText('2. Attack strategies')).toBeTruthy()
+    expect(screen.getByText(/Crescendo/)).toBeTruthy()
+    expect(screen.getByText('Max turns')).toBeTruthy()
+    expect(screen.getByText('Launch PyRIT')).toBeTruthy()
   })
 })

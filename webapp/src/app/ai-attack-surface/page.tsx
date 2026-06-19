@@ -5,7 +5,7 @@ import { AlertTriangle, KeyRound, Loader2, Play, Plus, ShieldAlert, Square, Term
 import { useProject } from '@/providers/ProjectProvider'
 import { useAiAttackSurface } from '@/hooks/useAiAttackSurface'
 import {
-  ALL_CARDS, ATTACK_CHIPS, GARAK_CARD, resolveAuth, splitUrl,
+  ALL_CARDS, ATTACK_CHIPS, resolveAuth, splitUrl,
   type AuthMode, type ChipKey, type CustomTarget, type ToolCard,
 } from '@/lib/aiAttackSurface'
 import styles from './page.module.css'
@@ -36,6 +36,7 @@ export default function AiAttackSurfacePage() {
   const [trials, setTrials] = useState(1)
   const [asrThreshold, setAsrThreshold] = useState(0.3)
   const [judgeModel, setJudgeModel] = useState('qwen2.5:7b')
+  const [maxTurns, setMaxTurns] = useState(4)
   const [roeConfirmed, setRoeConfirmed] = useState(false)
 
   // Shared: target auth (None / Bearer / Custom header) — reused by every tool.
@@ -89,7 +90,18 @@ export default function AiAttackSurfacePage() {
     setCustomModel('')
   }
 
-  const launchGarak = async () => {
+  // The tool whose detail view is open (garak / pyrit / …).
+  const openCard = ALL_CARDS.find((c) => c.id === openTool && c.available) || null
+
+  // Open a tool's detail view, defaulting its strategy selection.
+  const openConfig = (card: ToolCard) => {
+    if (openTool === card.id) { setOpenTool(null); return }
+    setOpenTool(card.id)
+    setSelectedProbes(new Set(card.probes.length ? [card.probes[0].id] : []))
+  }
+
+  const launchTool = async () => {
+    if (!openCard) return
     const chosen = s.targets.filter((t) => selectedTargets.has(targetKey(t)))
     const graphTargets = chosen.map((t) => ({ baseurl: t.baseUrl, path: t.path, method: t.method }))
     const custom = customTargets.map((c) => ({
@@ -101,9 +113,9 @@ export default function AiAttackSurfacePage() {
       headerName: customHeaderName, headerValue: customHeaderValue,
     })
     await s.launch({
-      tool: 'garak',
+      tool: openCard.id,
       targets: [...graphTargets, ...custom],
-      bounds: { trials, asr_threshold: asrThreshold, judge_model: judgeModel },
+      bounds: { trials, asr_threshold: asrThreshold, judge_model: judgeModel, max_turns: maxTurns },
       roe_confirmed: roeConfirmed,
       probes: Array.from(selectedProbes),
       ...auth,
@@ -164,7 +176,7 @@ export default function AiAttackSurfacePage() {
                 {!card.available && <span className={styles.soon}>coming soon</span>}
                 {card.available && (
                   <button type="button" className={styles.launchBtn} disabled={greyed}
-                          onClick={() => setOpenTool(openTool === card.id ? null : card.id)}>
+                          onClick={() => openConfig(card)}>
                     {openTool === card.id ? 'Close' : 'Configure'}
                   </button>
                 )}
@@ -175,9 +187,9 @@ export default function AiAttackSurfacePage() {
       </div>
 
       {/* garak detail view (four blocks) */}
-      {openTool === 'garak' && (
+      {openCard && (
         <div className={styles.detail}>
-          <h2 className={styles.detailTitle}>garak — configure run</h2>
+          <h2 className={styles.detailTitle}>{openCard.name} — configure run</h2>
 
           {/* 1. Targets */}
           <section className={styles.block}>
@@ -228,11 +240,11 @@ export default function AiAttackSurfacePage() {
             {customErr && <p className={styles.err}>{customErr}</p>}
           </section>
 
-          {/* 2. Probes */}
+          {/* 2. Probes / strategies (tool-specific) */}
           <section className={styles.block}>
-            <h3 className={styles.blockTitle}>2. Probes</h3>
+            <h3 className={styles.blockTitle}>2. {openCard.style === 'multi-turn' ? 'Attack strategies' : 'Probes'}</h3>
             <div className={styles.probeRow}>
-              {GARAK_CARD.probes.map((p) => (
+              {openCard.probes.map((p) => (
                 <label key={p.id} className={styles.probe}>
                   <input type="checkbox" checked={selectedProbes.has(p.id)}
                          onChange={() => toggle(selectedProbes, p.id, setSelectedProbes)} />
@@ -240,7 +252,11 @@ export default function AiAttackSurfacePage() {
                 </label>
               ))}
             </div>
-            <p className={styles.hint}>Whole families can be slow on CPU; start with one (e.g. dan) to validate.</p>
+            <p className={styles.hint}>
+              {openCard.style === 'multi-turn'
+                ? 'Each strategy runs bounded multi-turn objectives via the local judge.'
+                : 'Whole families can be slow on CPU; start with one (e.g. dan) to validate.'}
+            </p>
           </section>
 
           {/* 3. Run bounds */}
@@ -253,6 +269,10 @@ export default function AiAttackSurfacePage() {
                      onChange={(e) => setAsrThreshold(parseFloat(e.target.value) || 0)} /></label>
               <label>Judge<input type="text" value={judgeModel}
                      onChange={(e) => setJudgeModel(e.target.value)} /></label>
+              {openCard.style === 'multi-turn' && (
+                <label>Max turns<input type="number" min={1} value={maxTurns}
+                       onChange={(e) => setMaxTurns(parseInt(e.target.value) || 1)} /></label>
+              )}
             </div>
 
             {/* Target authentication (shared) */}
@@ -287,8 +307,8 @@ export default function AiAttackSurfacePage() {
               <AlertTriangle size={14} /> I confirm this is an authorized, in-scope target (RoE).
             </label>
             <div className={styles.launchRow}>
-              <button type="button" className={styles.primary} disabled={!canLaunch} onClick={launchGarak}>
-                {s.launching ? <Loader2 size={14} className={styles.spin} /> : <Play size={14} />} Launch garak
+              <button type="button" className={styles.primary} disabled={!canLaunch} onClick={launchTool}>
+                {s.launching ? <Loader2 size={14} className={styles.spin} /> : <Play size={14} />} Launch {openCard.name}
               </button>
               {running && (
                 <button type="button" className={styles.stop} onClick={s.stop}>
