@@ -1,11 +1,13 @@
 """
 Recon Orchestrator API - FastAPI service for managing recon containers
 """
+import asyncio
 import json
 import logging
 import os
 import socket
 from contextlib import asynccontextmanager
+from typing import Optional
 
 import docker
 from fastapi import FastAPI, HTTPException, UploadFile
@@ -13,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
 from container_manager import ContainerManager
+from local_llm_manager import LocalLlmManager
 from models import (
     HealthResponse,
     ReconStartRequest,
@@ -107,16 +110,22 @@ VERSION = "1.0.0"
 
 # Global container manager
 container_manager: ContainerManager = None
+# On-demand local LLM (Ollama) judge/attacker for the AI Attack Surface layer
+local_llm_manager: LocalLlmManager = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize and cleanup resources"""
-    global container_manager
+    global container_manager, local_llm_manager
     logger.info("Starting Recon Orchestrator...")
     container_manager = ContainerManager(recon_image=RECON_IMAGE, gvm_image=GVM_IMAGE, github_hunt_image=GITHUB_HUNT_IMAGE, trufflehog_image=TRUFFLEHOG_IMAGE)
+    # Share the orchestrator's docker client so the LLM lifecycle uses the same daemon.
+    local_llm_manager = LocalLlmManager(client=container_manager.client)
     yield
     logger.info("Shutting down Recon Orchestrator...")
+    if local_llm_manager:
+        local_llm_manager.shutdown()
     await container_manager.cleanup()
 
 
@@ -149,6 +158,43 @@ async def health_check():
         running_trufflehog_scans=container_manager.get_trufflehog_running_count() if container_manager else 0,
         gvm_available=container_manager.is_gvm_available() if container_manager else False,
     )
+
+
+@app.get("/local-llm/status")
+async def local_llm_status():
+    """Current state of the on-demand local LLM (Ollama) judge service.
+
+    Part of the AI Attack Surface layer (Step 1). Read-only: does not change
+    the lease count or start/stop the container.
+    """
+    if not local_llm_manager:
+        raise HTTPException(status_code=503, detail="Local LLM manager not initialized")
+    status = await asyncio.to_thread(local_llm_manager.status)
+    return status.to_dict()
+
+
+@app.post("/local-llm/ensure")
+async def local_llm_ensure(model: Optional[str] = None):
+    """Acquire a lease and bring the local LLM up (spawn + pull model if needed).
+
+    Ref-counted: each call increments the lease. Failure-soft -- always returns
+    a status (available=false + warning on any failure), never errors out.
+    First-ever call may take minutes to pull the model into the persistent volume.
+    """
+    if not local_llm_manager:
+        raise HTTPException(status_code=503, detail="Local LLM manager not initialized")
+    status = await asyncio.to_thread(local_llm_manager.ensure_up, model)
+    return status.to_dict()
+
+
+@app.post("/local-llm/release")
+async def local_llm_release():
+    """Release one lease. When the last lease is freed the container is stopped
+    and removed; the model-weights volume (redamon_llm_models) persists."""
+    if not local_llm_manager:
+        raise HTTPException(status_code=503, detail="Local LLM manager not initialized")
+    status = await asyncio.to_thread(local_llm_manager.release)
+    return status.to_dict()
 
 
 @app.get("/defaults")

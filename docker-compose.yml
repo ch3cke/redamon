@@ -313,6 +313,14 @@ services:
       GVM_SOCKET_PATH: /run/gvmd/gvmd.sock
       GVM_USERNAME: admin
       GVM_PASSWORD: ${GVM_PASSWORD:-admin}
+      # On-demand local LLM (Ollama) judge/attacker for the AI Attack Surface
+      # layer. Spawned on scan launch, torn down when the last job finishes;
+      # weights persist in the redamon_llm_models volume. Host network -> the
+      # spawned scan containers reach it at localhost:11434.
+      LOCAL_LLM_IMAGE: ${LOCAL_LLM_IMAGE:-ollama/ollama:latest}
+      LOCAL_LLM_MODEL: ${LOCAL_LLM_MODEL:-qwen2.5:7b}
+      LOCAL_LLM_PORT: ${LOCAL_LLM_PORT:-11434}
+      LOCAL_LLM_GPU: ${LOCAL_LLM_GPU:-}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
@@ -639,6 +647,12 @@ volumes:
     name: redamon_kb_data
   tradecraft_cache:
     name: redamon_tradecraft_cache
+  # On-demand local LLM (Ollama) model weights for the AI Attack Surface layer.
+  # The container is spawned/torn down per scan; this volume persists the pulled
+  # judge/attacker models so restarts reload from RAM, not a re-download.
+  # Name must match LLM_MODELS_VOLUME in recon_orchestrator/local_llm_manager.py.
+  llm_models:
+    name: redamon_llm_models
   # GVM volumes (names must match container_manager.py references)
   vt_data:
     name: redamon_vt_data
