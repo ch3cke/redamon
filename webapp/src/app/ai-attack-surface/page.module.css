@@ -1,0 +1,70 @@
+.page { padding: 24px 32px; max-width: 1400px; margin: 0 auto; }
+
+.header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }
+.title { display: flex; align-items: center; gap: 10px; font-size: 24px; font-weight: 700; margin: 0; }
+.subtitle { margin: 6px 0 0; opacity: 0.7; font-size: 14px; }
+.discovered { font-weight: 600; opacity: 0.9; }
+
+.filterBar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+.filterLabel { font-size: 13px; opacity: 0.6; margin-right: 4px; }
+.filterChip { background: transparent; border: 1px solid; border-radius: 999px; padding: 3px 12px; font-size: 12px; cursor: pointer; opacity: 0.55; transition: opacity 0.12s; }
+.filterChip:hover { opacity: 0.85; }
+.filterChipActive { opacity: 1; font-weight: 700; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; margin-bottom: 28px; }
+.card { border: 1px solid rgba(128,128,128,0.25); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 8px; background: rgba(128,128,128,0.04); }
+.cardGreyed { opacity: 0.45; }
+.cardChips { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip { border: 1px solid; border-radius: 999px; padding: 1px 8px; font-size: 11px; white-space: nowrap; }
+.cardName { font-size: 17px; font-weight: 700; display: flex; justify-content: space-between; align-items: baseline; }
+.cardStyle { font-size: 11px; opacity: 0.6; font-weight: 500; }
+.cardPurpose { font-size: 13px; opacity: 0.75; }
+.cardMeta { display: flex; justify-content: space-between; font-size: 11px; opacity: 0.6; margin-top: 4px; }
+.cardActions { display: flex; justify-content: flex-end; align-items: center; margin-top: 8px; }
+.soon { font-size: 11px; opacity: 0.5; font-style: italic; }
+.launchBtn { border: 1px solid rgba(128,128,128,0.4); background: transparent; color: inherit; border-radius: 8px; padding: 5px 14px; font-size: 13px; cursor: pointer; }
+.launchBtn:hover:not(:disabled) { background: rgba(128,128,128,0.12); }
+.launchBtn:disabled { cursor: not-allowed; opacity: 0.5; }
+
+.detail { border: 1px solid rgba(128,128,128,0.25); border-radius: 12px; padding: 20px; margin-bottom: 28px; }
+.detailTitle { font-size: 18px; font-weight: 700; margin: 0 0 14px; }
+.block { padding: 12px 0; border-top: 1px solid rgba(128,128,128,0.15); }
+.block:first-of-type { border-top: none; }
+.blockTitle { font-size: 14px; font-weight: 600; margin: 0 0 10px; display: flex; align-items: center; gap: 6px; }
+.muted { opacity: 0.55; font-size: 13px; }
+.hint { opacity: 0.5; font-size: 12px; margin: 6px 0 0; }
+
+.row { display: flex; align-items: center; gap: 10px; padding: 4px 0; font-size: 13px; cursor: pointer; }
+.rowMain { font-family: monospace; }
+.rowCtx { opacity: 0.55; font-size: 12px; margin-left: auto; }
+
+.probeRow { display: flex; flex-wrap: wrap; gap: 14px; }
+.probe { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+
+.boundsRow { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 10px; }
+.boundsRow label { display: flex; flex-direction: column; font-size: 12px; opacity: 0.8; gap: 4px; }
+.boundsRow input { width: 110px; padding: 5px 8px; border: 1px solid rgba(128,128,128,0.35); border-radius: 6px; background: transparent; color: inherit; }
+.roe { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 8px 0; }
+
+.launchRow { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.primary { display: flex; align-items: center; gap: 6px; background: #dc2626; color: #fff; border: none; border-radius: 8px; padding: 8px 18px; font-size: 14px; font-weight: 600; cursor: pointer; }
+.primary:disabled { opacity: 0.45; cursor: not-allowed; }
+.stop { display: flex; align-items: center; gap: 6px; background: transparent; border: 1px solid rgba(128,128,128,0.4); color: inherit; border-radius: 8px; padding: 8px 16px; cursor: pointer; }
+.err { color: #ef4444; font-size: 13px; }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.status { font-size: 13px; margin-bottom: 10px; }
+.logs { background: rgba(0,0,0,0.35); border-radius: 8px; padding: 12px; font-size: 12px; max-height: 320px; overflow: auto; font-family: monospace; }
+.log_info { opacity: 0.85; }
+.log_error { color: #f87171; }
+.log_success { color: #4ade80; }
+.log_action { color: #60a5fa; }
+
+.findings { margin-top: 8px; }
+.table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.table th, .table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid rgba(128,128,128,0.15); }
+.table th { font-weight: 600; opacity: 0.7; font-size: 12px; }
+.tgt { font-family: monospace; font-size: 12px; }
+.ev { font-family: monospace; font-size: 11px; opacity: 0.7; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sevDot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }

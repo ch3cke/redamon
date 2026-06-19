@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { Network, ShieldCheck, Target, ClipboardList, FolderOpen } from 'lucide-react'
+import { Network, ShieldCheck, Target, ClipboardList, FolderOpen, ShieldAlert } from 'lucide-react'
 import styles from './NavigationBar.module.css'
 
 interface NavItem {
@@ -23,6 +23,12 @@ const navItems: NavItem[] = [
     label: 'Graph Map',
     href: '/graph',
     icon: <Network size={16} />,
+    enabled: true,
+  },
+  {
+    label: 'AI Attack Surface',
+    href: '/ai-attack-surface',
+    icon: <ShieldAlert size={16} />,
     enabled: true,
   },
   {
