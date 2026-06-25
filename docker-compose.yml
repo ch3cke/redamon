@@ -728,6 +728,12 @@ networks:
   orchestrator-net:
     name: redamon-orchestrator-net
     driver: bridge
+    # Explicit subnet so Docker never auto-assigns this net the same /16 that
+    # pentest-net reserves below. Without it, orchestrator-net (created first)
+    # grabs the next free /16 — which can land on 172.28 and collide.
+    ipam:
+      config:
+        - subnet: 172.29.0.0/16
   pentest-net:
     driver: bridge
     ipam:
