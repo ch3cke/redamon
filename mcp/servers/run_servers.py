@@ -118,11 +118,24 @@ def run_server(name: str, config: dict, transport: str = "sse"):
                 module.start_hydra_progress_server(hydra_progress_port)
                 logger.info(f"Started Hydra progress server on port {hydra_progress_port}")
 
-            module.mcp.run(
-                transport="sse",
-                host="0.0.0.0",
-                port=config["port"]
-            )
+            # Bind 0.0.0.0 INSIDE the container so the agent can reach us over
+            # the internal `redamon` bridge; host publish is loopback-only. Wrap
+            # the SSE app in bearer-token auth (STRIDE S10). serve_sse_with_auth
+            # fails open (with a warning) when MCP_AUTH_TOKEN is unset and falls
+            # back to a plain mcp.run() if the wrapper cannot bind on this
+            # FastMCP version, so tool serving is never bricked. If the auth
+            # module itself cannot be imported, degrade to plain serving (still
+            # loopback-only) rather than crash-looping the whole server.
+            try:
+                from _auth_middleware import serve_sse_with_auth
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    f"[{name}] _auth_middleware import failed ({e}); serving "
+                    f"WITHOUT bearer auth (host ports are loopback-only)."
+                )
+                module.mcp.run(transport="sse", host="0.0.0.0", port=config["port"])
+            else:
+                serve_sse_with_auth(module.mcp, host="0.0.0.0", port=config["port"])
         else:
             module.mcp.run(transport="stdio")
 

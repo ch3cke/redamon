@@ -71,7 +71,8 @@ These variables are set in `docker-compose.yml` and passed to the container:
 | Variable | Value | Description |
 |----------|-------|-------------|
 | `MCP_TRANSPORT` | `sse` | Transport mode: `stdio` (direct) or `sse` (network) |
-| `MCP_HOST` | `0.0.0.0` | Host to bind servers (`0.0.0.0` = all interfaces) |
+| `MCP_HOST` | `0.0.0.0` | Bind address **inside the container** (so the agent can reach the servers over the internal `redamon` bridge). The *host* port publish is loopback-only — see the security note below. |
+| `MCP_AUTH_TOKEN` | *(generated)* | Bearer token required on every MCP SSE request. Auto-generated into `.env` by `redamon.sh`; the agent sends it, the servers validate it. Empty/unset ⇒ servers **fail open** with a warning (dev only). |
 | `NETWORK_RECON_PORT` | `8000` | HTTP client + port scanner server |
 | `NUCLEI_PORT` | `8002` | Vulnerability scanner server |
 | `METASPLOIT_PORT` | `8003` | Exploitation framework server |
@@ -154,8 +155,8 @@ docker-compose ps
 # View logs
 docker-compose logs -f kali-sandbox
 
-# Test a server
-curl http://localhost:8000/health
+# Test a server (SSE servers require the bearer token; without it you get 401)
+curl -H "Authorization: Bearer $MCP_AUTH_TOKEN" http://127.0.0.1:8000/sse
 
 # Test commmands run for each server:
 python mcp/test_mcp.py https://testphp.vulnweb.com
@@ -163,13 +164,20 @@ python mcp/test_mcp.py https://testphp.vulnweb.com
 
 ### 3. Connect AI Agent
 
-The MCP servers are available at:
-- **network_recon**: `http://localhost:8000` (HTTP requests + port scanning)
-- **nuclei**: `http://localhost:8002` (vulnerability scanning)
-- **metasploit**: `http://localhost:8003` (exploitation)
-- **nmap**: `http://localhost:8004` (service detection, OS fingerprinting, NSE scripts)
-- **playwright**: `http://localhost:8005` (browser automation, JS-rendered content)
-- **metasploit progress**: `http://localhost:8013/progress` (live progress for long-running commands)
+> **Host ports are loopback-only + token-authenticated (since 5.3.1).** The MCP
+> servers are published on `127.0.0.1` (not the LAN) and every SSE request must
+> carry `Authorization: Bearer $MCP_AUTH_TOKEN`. The agent connects to them over
+> the internal Docker network (`http://kali-sandbox:PORT/sse`) with the token
+> attached automatically — the `localhost` URLs below are for **local debugging
+> only**. See the [Security Notice](#security-notice).
+
+The MCP servers are available (on the host, loopback + bearer token) at:
+- **network_recon**: `http://127.0.0.1:8000/sse` (HTTP requests + port scanning)
+- **nuclei**: `http://127.0.0.1:8002/sse` (vulnerability scanning)
+- **metasploit**: `http://127.0.0.1:8003/sse` (exploitation)
+- **nmap**: `http://127.0.0.1:8004/sse` (service detection, OS fingerprinting, NSE scripts)
+- **playwright**: `http://127.0.0.1:8005/sse` (browser automation, JS-rendered content)
+- **metasploit progress**: `http://127.0.0.1:8013/progress` (live progress; loopback-only, no token)
 
 ## Available Tools
 
@@ -450,6 +458,28 @@ docker-compose down && docker-compose up -d
 ## Security Notice
 
 These tools are designed for **authorized penetration testing only**. Only use against systems you have explicit permission to test. The containers run with elevated privileges (`NET_ADMIN`, `NET_RAW`) required for network scanning.
+
+### Network exposure & authentication (since 5.3.1)
+
+The MCP servers grant powerful capabilities (including `kali_shell` command
+execution as root inside the sandbox), so their exposure is locked down by
+default:
+
+- **Loopback-only host publish.** The MCP servers (`8000/8002/8003/8004/8005`),
+  progress streams (`8013/8014`), tunnel-manager (`8015`) and ngrok API (`4040`)
+  are published on `127.0.0.1` — never on the LAN. The agent reaches them over
+  the internal `redamon` Docker bridge, so no functionality depends on host
+  reachability. (`4444`, the reverse-shell catcher, is intentionally left
+  routable so a real target can connect back in direct/no-tunnel mode.)
+- **Bearer-token auth.** Every MCP SSE request must carry
+  `Authorization: Bearer $MCP_AUTH_TOKEN`. `redamon.sh` generates the token into
+  `.env`; the agent sends it automatically. If the token is unset (e.g. a manual
+  `docker compose up` without running `redamon.sh`), the servers **fail open**
+  with a startup warning — the loopback bind is still the active control in that
+  case. To require auth in that scenario, set `MCP_AUTH_TOKEN` in `.env`.
+
+This closes the unauthenticated-RCE surface tracked as STRIDE **S10 / E1 / I9**
+in `internal/security/README.TM.STRIDE.md`.
 
 ## Troubleshooting
 

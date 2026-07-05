@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.3.1] - 2026-07-05
+
+### Security
+
+- **Kali MCP surface hardening — authenticate + loopback-bind the offensive tool servers** ([docker-compose.yml](docker-compose.yml), [mcp/servers/_auth_middleware.py](mcp/servers/_auth_middleware.py), [mcp/servers/run_servers.py](mcp/servers/run_servers.py), [agentic/tools.py](agentic/tools.py), [redamon.sh](redamon.sh)). Closes a responsibly-disclosed unauthenticated-RCE surface (STRIDE **S10**/**I9**, partial **E1**): the Kali MCP servers (`8000/8002/8003/8004/8005`), progress streams (`8013/8014`), tunnel-manager (`8015`) and ngrok API (`4040`) — plus the datastores (`5432/7474/7687`) — are now published on `127.0.0.1` only. The container still binds `0.0.0.0` inside its network namespace, so the agent reaches every server over the internal `redamon` bridge unchanged, but a LAN/remote client can no longer reach the tool surface. A generated `MCP_AUTH_TOKEN` is now required as `Authorization: Bearer` on every MCP SSE request (pure-ASGI middleware server-side, existing `mcp_registry` `BearerAuth` plumbing client-side); it fails open with a warning only when the token is unset, so token-less dev stacks keep working. `4444` (reverse-shell catcher) is intentionally left routable for direct/no-tunnel reverse shells.
+- **Datastore default-credential hardening (STRIDE S13)** ([redamon.sh](redamon.sh)). `ensure_db_secrets` generates strong `POSTGRES_PASSWORD`/`NEO4J_PASSWORD` on a **fresh** install (before the data volumes initialise) and **warns without rewriting** on an existing install still on the compose default (rewriting would break auth against the already-initialised volume). Combined with the loopback bind of `5432/7474/7687`, the "foothold → default-credentialed DB on the shared bridge" path is closed.
+- Covered by [tests/redamon_secrets_test.sh](tests/redamon_secrets_test.sh), [tests/test_port_bindings.sh](tests/test_port_bindings.sh), [mcp/servers/tests/test_auth_middleware.py](mcp/servers/tests/test_auth_middleware.py), [agentic/tests/test_system_mcp_auth.py](agentic/tests/test_system_mcp_auth.py), [tests/test_exploit_blocked.sh](tests/test_exploit_blocked.sh), aggregated by [tests/run_security_remediation_suite.sh](tests/run_security_remediation_suite.sh). Threat-model status updated in [internal/security/README.TM.STRIDE.md](internal/security/README.TM.STRIDE.md).
+
+---
+
 ## [5.3.0] - 2026-07-04
 
 ### Added

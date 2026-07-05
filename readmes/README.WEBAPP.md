@@ -414,7 +414,7 @@ Downloads the recon output JSON file for the project.
 | `NEO4J_URI` | Neo4j connection URI | `bolt://localhost:7687` (dev) / `bolt://redamon-neo4j:7687` (Docker) |
 | `NEO4J_USER` | Neo4j username | `neo4j` |
 | `NEO4J_PASSWORD` | Neo4j password | (set in .env.local) |
-| `DATABASE_URL` | PostgreSQL connection string | `postgresql://redamon:redamon_secret@localhost:5432/redamon` |
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql://redamon:<POSTGRES_PASSWORD>@localhost:5432/redamon` (password from `.env`, generated on fresh install; host port loopback-only) |
 | `RECON_ORCHESTRATOR_URL` | Recon orchestrator service URL | `http://localhost:8010` |
 | `ORCHESTRATOR_API_KEY` | Sent as `X-Orchestrator-Key` on every orchestrator call; must match the orchestrator's value (auto-generated in `.env`) | (generated) |
 | `NODE_ENV` | Environment mode | `development` |

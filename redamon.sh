@@ -490,6 +490,84 @@ ensure_auth_secrets() {
         echo "ORCHESTRATOR_API_KEY=$(openssl rand -hex 32)" >> "$env_file"
         info "Generated ORCHESTRATOR_API_KEY"
     fi
+    # Shared bearer token the agent presents to the Kali MCP servers and the
+    # servers validate on every inbound SSE request (STRIDE S10 defense-in-depth).
+    # Stateless (not baked into any volume), so append-if-absent is safe.
+    if ! grep -q '^MCP_AUTH_TOKEN=' "$env_file" 2>/dev/null; then
+        echo "MCP_AUTH_TOKEN=$(openssl rand -hex 32)" >> "$env_file"
+        info "Generated MCP_AUTH_TOKEN"
+    fi
+}
+
+# Compose project name (used to resolve the data-volume names). Must match
+# docker compose's own derivation or ensure_db_secrets would mis-detect a fresh
+# vs existing install and could regenerate a password against a live DB.
+# Precedence mirrors compose: exported COMPOSE_PROJECT_NAME, then the same var in
+# .env, then the sanitised working-directory basename.
+compose_project_name() {
+    if [ -n "${COMPOSE_PROJECT_NAME:-}" ]; then
+        echo "$COMPOSE_PROJECT_NAME"
+        return
+    fi
+    local env_file="$SCRIPT_DIR/.env"
+    if [ -f "$env_file" ]; then
+        local from_env
+        from_env="$(grep -E '^COMPOSE_PROJECT_NAME=' "$env_file" 2>/dev/null | head -1 | cut -d= -f2-)"
+        if [ -n "$from_env" ]; then
+            echo "$from_env"
+            return
+        fi
+    fi
+    basename "$SCRIPT_DIR" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-'
+}
+
+# True (0) if the named docker volume for THIS project already exists.
+_data_volume_exists() {
+    local suffix="$1"   # e.g. postgres_data
+    local project; project="$(compose_project_name)"
+    docker volume inspect "${project}_${suffix}" >/dev/null 2>&1
+}
+
+# Harden the datastore passwords (STRIDE S13/S1). The passwords are baked into
+# the postgres/neo4j data volumes at FIRST init, so we only auto-generate on a
+# FRESH install (volume absent). On an existing install still on the compose
+# default we must NOT rewrite .env (it would break auth against the already
+# initialised volume) — we warn loudly and point to the rotation procedure.
+# Uses url/shell-safe hex so DATABASE_URL and NEO4J_AUTH need no escaping.
+ensure_db_secrets() {
+    local env_file="$SCRIPT_DIR/.env"
+    touch "$env_file"
+
+    # (var, volume suffix, compose default) triples.
+    local specs=(
+        "POSTGRES_PASSWORD:postgres_data:redamon_secret"
+        "NEO4J_PASSWORD:neo4j_data:changeme123"
+    )
+
+    local spec var suffix default
+    for spec in "${specs[@]}"; do
+        var="${spec%%:*}"
+        suffix="$(echo "$spec" | cut -d: -f2)"
+        default="${spec##*:}"
+
+        # Operator already pinned it in .env — respect it, do nothing.
+        if grep -q "^${var}=" "$env_file" 2>/dev/null; then
+            continue
+        fi
+
+        if _data_volume_exists "$suffix"; then
+            # Existing DB, initialised with the weak compose default. Changing
+            # the password now would lock us out of the running volume.
+            warn "${var} is unset and the ${suffix} volume already exists, so it is running on the DEFAULT password ('${default}')."
+            warn "  Not changing it automatically (would break the existing database)."
+            warn "  To rotate: set a strong ${var} in .env, then update the DB's own password to match (e.g. ALTER USER / neo4j 'dbms.security.changePassword'), or destroy the ${suffix} volume for a clean re-init if the data is disposable."
+        else
+            # Fresh install — generate before the DB volume is created so it
+            # initialises with the strong value across all consumers.
+            echo "${var}=$(openssl rand -hex 24)" >> "$env_file"
+            info "Generated strong ${var} (fresh install)"
+        fi
+    done
 }
 
 ensure_admin() {
@@ -970,6 +1048,7 @@ cmd_install() {
 
     # Generate auth secrets if not present
     ensure_auth_secrets
+    ensure_db_secrets
 
     # Build all images (tools + core services)
     info "Building all images (this may take a while on first run)..."
@@ -1257,6 +1336,7 @@ cmd_update() {
 
     # Ensure auth secrets exist (first update after auth feature is added)
     ensure_auth_secrets
+    ensure_db_secrets
 
     # Ensure an admin user exists (prompts if none found)
     ensure_admin
@@ -1289,6 +1369,7 @@ cmd_up_dev() {
 
     ensure_tool_images
     ensure_auth_secrets
+    ensure_db_secrets
 
     info "Starting RedAmon in DEV mode (GVM: ${gvm_flag})..."
 
@@ -1349,6 +1430,7 @@ cmd_up() {
 
     ensure_tool_images
     ensure_auth_secrets
+    ensure_db_secrets
 
     info "Starting RedAmon (GVM: ${gvm_mode})..."
 

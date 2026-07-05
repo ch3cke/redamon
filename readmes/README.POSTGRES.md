@@ -164,10 +164,12 @@ POSTGRES_DB=redamon
 
 ### Connection URL
 
-In `webapp/.env.local`:
+In `webapp/.env.local` (replace `<POSTGRES_PASSWORD>` with the value from your
+root `.env` — `redamon.sh` generates a strong one on a fresh install; the host
+port is published on `127.0.0.1` only):
 
 ```bash
-DATABASE_URL="postgresql://redamon:redamon_secret@localhost:5432/redamon?schema=public"
+DATABASE_URL="postgresql://redamon:<POSTGRES_PASSWORD>@127.0.0.1:5432/redamon?schema=public"
 ```
 
 ### Common Commands

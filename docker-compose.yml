@@ -26,7 +26,12 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-redamon_secret}
       POSTGRES_DB: ${POSTGRES_DB:-redamon}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      # Loopback-only: app tier reaches Postgres over the internal `redamon`
+      # bridge (postgres:5432); host publish is debug-only. Prevents LAN/remote
+      # reach to a default-credentialed DB (STRIDE S13). Override via .env if you
+      # genuinely need host access (e.g. POSTGRES_PORT=0.0.0.0:5432 is NOT valid;
+      # instead drop the 127.0.0.1 prefix intentionally).
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
@@ -54,8 +59,11 @@ services:
       NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP:-2g}
       NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE:-1g}
     ports:
-      - "${NEO4J_HTTP_PORT:-7474}:7474"
-      - "${NEO4J_BOLT_PORT:-7687}:7687"
+      # Loopback-only: the agent/webapp reach Neo4j over the internal `redamon`
+      # bridge (neo4j:7687); host publish is debug-only. Prevents LAN/remote reach
+      # to a default-credentialed graph DB (STRIDE S13).
+      - "127.0.0.1:${NEO4J_HTTP_PORT:-7474}:7474"
+      - "127.0.0.1:${NEO4J_BOLT_PORT:-7687}:7687"
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
@@ -471,17 +479,28 @@ services:
     security_opt:
       - seccomp:unconfined
     ports:
-      - "${MCP_NETWORK_RECON_PORT:-8000}:8000"
-      - "${MCP_NUCLEI_PORT:-8002}:8002"
-      - "${MCP_METASPLOIT_PORT:-8003}:8003"
-      - "${MCP_NMAP_PORT:-8004}:8004"
-      - "${MCP_PLAYWRIGHT_PORT:-8005}:8005"
-      - "8013:8013"
-      - "8014:8014"
+      # SECURITY (STRIDE S10/E1/I9): the MCP tool servers, progress streams,
+      # tunnel-manager and ngrok API are consumed ONLY by the agent/webapp over
+      # the internal `redamon` bridge (http://kali-sandbox:PORT) — never from the
+      # host. They are published on 127.0.0.1 for local debugging only, so a
+      # LAN/remote client can no longer reach the unauthenticated tool surface.
+      # The container still binds 0.0.0.0 INSIDE the netns (MCP_HOST below), so
+      # cross-container bridge traffic is unaffected.
+      - "127.0.0.1:${MCP_NETWORK_RECON_PORT:-8000}:8000"
+      - "127.0.0.1:${MCP_NUCLEI_PORT:-8002}:8002"
+      - "127.0.0.1:${MCP_METASPLOIT_PORT:-8003}:8003"
+      - "127.0.0.1:${MCP_NMAP_PORT:-8004}:8004"
+      - "127.0.0.1:${MCP_PLAYWRIGHT_PORT:-8005}:8005"
+      - "127.0.0.1:8013:8013"   # MSF progress stream (agent-internal)
+      - "127.0.0.1:8014:8014"   # Hydra progress stream (agent-internal)
+      # 4444 stays routable on purpose: a compromised target connects BACK to the
+      # operator host:4444 in direct (no-tunnel) reverse-shell mode. Loopback here
+      # would break direct reverse shells. When a tunnel is active it binds
+      # 127.0.0.1:4444 internally and is reached via the tunnel instead.
       - "4444:4444"
-      - "4040:4040"
-      - "8015:8015"
-      - "127.0.0.1:8016:8016"
+      - "127.0.0.1:4040:4040"   # ngrok local API (agent-internal)
+      - "127.0.0.1:8015:8015"   # tunnel-manager config (webapp-internal)
+      - "127.0.0.1:8016:8016"   # terminal PTY WS (browser reaches via agent:8090)
     volumes:
       # V7: read-only so a compromised worker cannot trojanize its own MCP server
       # source for restart-surviving persistence. The worker only READS these
@@ -513,6 +532,11 @@ services:
       MSF_AUTO_UPDATE: "${MSF_AUTO_UPDATE:-true}"
       NUCLEI_AUTO_UPDATE: "${NUCLEI_AUTO_UPDATE:-true}"
       TERMINAL_WS_PORT: "8016"
+      # INBOUND auth token the MCP servers validate on every SSE request (STRIDE
+      # S10). This is NOT an outbound secret — it is the credential the worker
+      # CHECKS, so holding it does not violate the "worker holds no secrets" rule.
+      # When empty (dev / not generated) the servers fail-open with a warning.
+      MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:-}"
       # Webapp API for fetching tunnel config from Global Settings on boot
       WEBAPP_API_URL: http://webapp:3000
       # NOTE: INTERNAL_API_KEY is intentionally NOT passed to the worker. The
@@ -569,6 +593,10 @@ services:
       MCP_METASPLOIT_PROGRESS_URL: http://kali-sandbox:8013/progress
       MCP_HYDRA_PROGRESS_URL: http://kali-sandbox:8014/progress
       KALI_TERMINAL_WS_URL: ws://kali-sandbox:8016
+      # Bearer token sent as `Authorization: Bearer` on every MCP SSE request so
+      # the Kali servers can authenticate the agent (STRIDE S10). Must match the
+      # kali-sandbox MCP_AUTH_TOKEN. Empty in dev → no header, servers fail-open.
+      MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:-}"
       # Webapp API (internal docker network)
       WEBAPP_API_URL: http://webapp:3000
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-changeme}

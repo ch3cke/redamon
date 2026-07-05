@@ -553,9 +553,9 @@ All REST endpoints live in `webapp/src/app/api/`. There are 17 route groups:
 | Agent | `http://agent:8080` |
 | Recon Orchestrator | `http://recon-orchestrator:8010` (reachable **only from the webapp** — on `orchestrator-net`, not `redamon`) |
 | Webapp | `http://webapp:3000` (the orchestrator reaches it via its own `WEBAPP_API_URL` for RoE/guardrail pre-flight) |
-| Kali Sandbox (MCP) | `http://kali-sandbox:8000/sse` |
+| Kali Sandbox (MCP) | `http://kali-sandbox:8000/sse` (requires `Authorization: Bearer $MCP_AUTH_TOKEN`) |
 | Neo4j | `bolt://neo4j:7687` |
-| PostgreSQL | `postgresql://redamon:redamon_secret@postgres:5432/redamon` |
+| PostgreSQL | `postgresql://redamon:<POSTGRES_PASSWORD>@postgres:5432/redamon` (password from `.env`, generated on fresh install) |
 
 **React hooks:**
 
@@ -694,9 +694,12 @@ docker compose exec webapp npx prisma studio    # Visual DB browser (http://loca
 docker compose exec postgres psql -U redamon -c "SELECT * FROM \"Project\" LIMIT 5;"
 
 # ─── Database (Neo4j) ───────────────────────────────────────────────────
-# Browser UI:  http://localhost:7474
-# Bolt URL:    bolt://localhost:7687
-# Credentials: neo4j / changeme123 (or your NEO4J_PASSWORD from .env)
+# Browser UI:  http://127.0.0.1:7474   (loopback-only host publish)
+# Bolt URL:    bolt://127.0.0.1:7687
+# Credentials: neo4j / <NEO4J_PASSWORD from .env>
+#   On a fresh install redamon.sh generates a strong NEO4J_PASSWORD into .env;
+#   the changeme123 compose fallback only applies if the var is left unset.
+#   Get it with:  grep '^NEO4J_PASSWORD=' .env
 
 # ─── Service Management ─────────────────────────────────────────────────
 docker compose ps                               # Check all container statuses
@@ -897,15 +900,26 @@ No `.env` file is required. All user-configurable settings (API keys, tunnel cre
 
 These use Docker Compose's `${VAR:-default}` syntax. Override them in `.env` if needed.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
+> **Secrets are auto-generated on install (since 5.3.1).** `redamon.sh` writes
+> strong random values for `POSTGRES_PASSWORD`, `NEO4J_PASSWORD` and
+> `MCP_AUTH_TOKEN` into `.env` on a **fresh** install (and warns, without
+> changing anything, if an existing DB volume is still on the old default). The
+> `${VAR:-default}` fallbacks below are only used when the variable is left
+> unset — they are **not** the value a normal install runs with.
+>
+> The DB host ports (`5432/7474/7687`) are published on `127.0.0.1` only; the
+> app tier reaches them over the internal `redamon` bridge.
+
+| Variable | Fallback (if unset) | Description |
+|----------|---------------------|-------------|
 | `POSTGRES_USER` | `redamon` | PostgreSQL username |
-| `POSTGRES_PASSWORD` | `redamon_secret` | PostgreSQL password |
+| `POSTGRES_PASSWORD` | `redamon_secret` | PostgreSQL password — **auto-generated on fresh install** |
 | `POSTGRES_DB` | `redamon` | PostgreSQL database name |
-| `NEO4J_PASSWORD` | `changeme123` | Neo4j password |
-| `POSTGRES_PORT` | `5432` | Host port for PostgreSQL |
-| `NEO4J_HTTP_PORT` | `7474` | Host port for Neo4j Browser UI |
-| `NEO4J_BOLT_PORT` | `7687` | Host port for Neo4j Bolt protocol |
+| `NEO4J_PASSWORD` | `changeme123` | Neo4j password — **auto-generated on fresh install** |
+| `MCP_AUTH_TOKEN` | *(empty ⇒ MCP servers fail open)* | Bearer token the agent presents to the Kali MCP servers — **auto-generated on fresh install** |
+| `POSTGRES_PORT` | `5432` | Host port for PostgreSQL (bound to `127.0.0.1`) |
+| `NEO4J_HTTP_PORT` | `7474` | Host port for Neo4j Browser UI (bound to `127.0.0.1`) |
+| `NEO4J_BOLT_PORT` | `7687` | Host port for Neo4j Bolt protocol (bound to `127.0.0.1`) |
 | `WEBAPP_PORT` | `3000` | Host port for the webapp |
 | `AGENT_PORT` | `8090` | Host port for the agent API (maps to internal :8080) |
 | `RECON_ORCH_PORT` | `8010` | Host port for the recon orchestrator |

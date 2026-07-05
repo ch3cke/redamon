@@ -66,7 +66,14 @@ from agent_context import (  # noqa: E402
 # rendering metadata for them.
 def _build_system_mcp_servers():
     """Lazy import — mcp_registry imports tool_registry which imports tools."""
-    from mcp_registry import MCPServer
+    from mcp_registry import MCPServer, BearerAuth
+
+    # STRIDE S10: authenticate to the Kali MCP servers with a shared bearer
+    # token resolved at request time from MCP_AUTH_TOKEN. When the env var is
+    # unset, _resolve_auth_header emits no Authorization header, matching the
+    # servers' fail-open behaviour so nothing breaks in token-less dev stacks.
+    _mcp_auth = BearerAuth(token_env_var="MCP_AUTH_TOKEN")
+
     return [
         MCPServer(
             id="network_recon",
@@ -77,6 +84,7 @@ def _build_system_mcp_servers():
             connect_timeout=60,
             read_timeout=1800,
             tools=[],
+            auth=_mcp_auth,
         ),
         MCPServer(
             id="nmap",
@@ -87,6 +95,7 @@ def _build_system_mcp_servers():
             connect_timeout=60,
             read_timeout=600,
             tools=[],
+            auth=_mcp_auth,
         ),
         MCPServer(
             id="metasploit",
@@ -97,6 +106,7 @@ def _build_system_mcp_servers():
             connect_timeout=60,
             read_timeout=1800,
             tools=[],
+            auth=_mcp_auth,
         ),
         MCPServer(
             id="nuclei",
@@ -107,6 +117,7 @@ def _build_system_mcp_servers():
             connect_timeout=60,
             read_timeout=600,
             tools=[],
+            auth=_mcp_auth,
         ),
         MCPServer(
             id="playwright",
@@ -117,6 +128,7 @@ def _build_system_mcp_servers():
             connect_timeout=60,
             read_timeout=120,
             tools=[],
+            auth=_mcp_auth,
         ),
     ]
 
